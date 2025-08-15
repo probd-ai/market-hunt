@@ -54,7 +54,7 @@ export default function StocksPage() {
   // Fetch stock statistics
   const { data: statistics, isLoading: statsLoading } = useQuery({
     queryKey: ['stockStatistics'],
-    queryFn: () => api.getStockStatistics(),
+    queryFn: () => api.getStockDataStatistics(),
   });
 
   // Fetch stock price data

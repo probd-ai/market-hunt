@@ -275,6 +275,29 @@ class APIClient {
     }
   }
 
+  async getHistoricalProcessing(limit: number = 10): Promise<HistoricalProcessing[]> {
+    // Stub implementation - returns empty array for now
+    // TODO: Implement backend endpoint /api/stock/history
+    return [];
+  }
+
+  async getTaskProgress(taskId: string): Promise<ProgressUpdate | null> {
+    // Stub implementation - returns null for now
+    // TODO: Implement backend endpoint /api/stock/tasks/{taskId}/progress
+    return null;
+  }
+
+  async deleteStockData(request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string }): Promise<{ success: boolean; message: string; deleted_count: number }> {
+    // Stub implementation - returns success response for now
+    // TODO: Implement backend endpoint /api/stock/delete
+    console.log('Delete stock data request:', request);
+    return {
+      success: true,
+      message: 'Delete functionality not yet implemented',
+      deleted_count: 0
+    };
+  }
+
   // Index and industry data methods
   async getIndexIndustries(indexName: string): Promise<any> {
     try {
