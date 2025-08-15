@@ -99,16 +99,21 @@ export interface NavItem {
 
 // Stock Data Management Types
 export interface SymbolMapping {
-  _id: string;
-  company_name: string;
   symbol: string;
+  company_name: string;
   industry: string;
   index_names: string[];
-  nse_scrip_code: number;
-  nse_symbol: string;
-  nse_name: string;
-  match_confidence: number;
-  last_updated: Date;
+  nse_scrip_code: number | null;
+  nse_symbol: string | null;
+  nse_name: string | null;
+  match_confidence: number | null;
+  last_updated: string | null;
+}
+
+export interface SymbolMappingResponse {
+  total_mappings: number;
+  mapped_count: number;
+  mappings: SymbolMapping[];
 }
 
 export interface StockPriceData {
@@ -133,13 +138,18 @@ export interface StockDataResponse {
 }
 
 export interface StockDataStatistics {
-  total_records: number;
-  unique_symbols_count: number;
-  date_range: {
-    earliest: Date;
-    latest: Date;
+  collections: {
+    [key: string]: {
+      record_count: number;
+    };
   };
-  partition_stats: Record<string, number>;
+  total_records: number;
+  symbols_with_data: string[];
+  date_range: {
+    earliest: string;
+    latest: string;
+  };
+  unique_symbols_count: number;
 }
 
 export interface DownloadStockDataRequest {
@@ -197,7 +207,7 @@ export interface DataGapInfo {
   data_available_until?: string;
   total_data_points?: number;
   realistic_start_date?: string; // Earliest date when data is actually downloadable
-  gaps_by_year?: { [year: string]: number }; // Missing days grouped by year
+  gaps_by_year?: { [year: string]: number }; // Missing days grouped by year (year -> missing_days_count)
   downloadable_gaps?: number; // Only gaps in downloadable period
 }
 

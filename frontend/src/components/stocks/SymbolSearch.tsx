@@ -47,7 +47,7 @@ export function SymbolSearch({ symbols, onSelect, selectedSymbol }: SymbolSearch
         <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-auto">
           {filteredSymbols.slice(0, 10).map((symbol) => (
             <button
-              key={symbol._id}
+              key={symbol.symbol}
               onClick={() => handleSelect(symbol.symbol)}
               className="w-full px-4 py-2 text-left hover:bg-gray-50 focus:bg-gray-50 focus:outline-none border-b border-gray-100 last:border-b-0"
             >

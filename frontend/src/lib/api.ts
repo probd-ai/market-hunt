@@ -1,4 +1,4 @@
-import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, StockPriceData, StockDataResponse, StockDataStatistics, DownloadStockDataRequest, SymbolMappingFilters, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
+import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, SymbolMappingResponse, StockPriceData, StockDataResponse, StockDataStatistics, DownloadStockDataRequest, SymbolMappingFilters, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
 
 const API_BASE = '/api';
 const BACKEND_API = 'http://localhost:3001/api';
@@ -106,7 +106,7 @@ class APIClient {
   }
 
   // Stock Data Management
-  async getSymbolMappings(filters?: SymbolMappingFilters): Promise<SymbolMapping[]> {
+  async getSymbolMappings(filters?: SymbolMappingFilters): Promise<SymbolMappingResponse> {
     try {
       const queryParams = new URLSearchParams();
       if (filters?.mapped_only) queryParams.append('mapped_only', 'true');
@@ -114,14 +114,7 @@ class APIClient {
       if (filters?.industry) queryParams.append('industry', filters.industry);
 
       const url = `/stock/mappings${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
-      const response = await this.directRequest<{
-        total_mappings: number;
-        mapped_count: number;
-        mappings: SymbolMapping[];
-      }>(url);
-      
-      // Extract the mappings array from the response
-      return response.mappings || [];
+      return await this.directRequest<SymbolMappingResponse>(url);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch symbol mappings');
     }
@@ -187,24 +180,23 @@ class APIClient {
         const gapData = response.gaps;
         gaps.push({
           symbol: request.symbol,
-          missing_dates: gapData.gaps.map((gap: any) => `${gap.start} to ${gap.end}`),
+          missing_dates: gapData.gaps?.map((gap: any) => `${gap.start} to ${gap.end}`) || [],
           first_date: gapData.has_data ? 'Has data' : 'No data available',
           last_date: gapData.has_data ? 'Current' : 'No data available',
-          total_gaps: gapData.total_missing_days,
-          downloadable_gaps: gapData.total_missing_days,
-          realistic_start_date: gapData.date_range.start,
+          total_gaps: gapData.total_missing_days || 0,
+          downloadable_gaps: gapData.total_missing_days || 0,
+          realistic_start_date: gapData.date_range?.start || request.start_date,
           user_range_start: request.start_date,
           user_range_end: request.end_date,
-          user_range_gaps: gapData.total_missing_days,
-          gaps_by_year: gapData.yearly_breakdown.map((year: any) => ({
-            year: year.year,
-            missing_days: year.missing_days,
-            total_days: year.expected_days
-          })),
-          data_available_from: gapData.date_range.start,
-          data_available_until: gapData.date_range.end,
-          total_data_points: gapData.total_actual_days,
-          full_period_gaps: gapData.total_missing_days > 0
+          user_range_gaps: gapData.total_missing_days || 0,
+          gaps_by_year: gapData.yearly_breakdown?.reduce((acc: any, year: any) => {
+            acc[year.year] = year.missing_days;
+            return acc;
+          }, {}) || {},
+          data_available_from: gapData.date_range?.start || request.start_date,
+          data_available_until: gapData.date_range?.end || request.end_date,
+          total_data_points: gapData.total_actual_days || 0,
+          full_period_gaps: (gapData.total_missing_days || 0) > 0
         });
       } else if (response.gaps) {
         // Handle multiple symbols (index/industry)
@@ -220,11 +212,10 @@ class APIClient {
             user_range_start: request.start_date,
             user_range_end: request.end_date,
             user_range_gaps: gapData.total_missing_days || 0,
-            gaps_by_year: gapData.yearly_breakdown?.map((year: any) => ({
-              year: year.year,
-              missing_days: year.missing_days,
-              total_days: year.expected_days
-            })) || [],
+            gaps_by_year: gapData.yearly_breakdown?.reduce((acc: any, year: any) => {
+              acc[year.year] = year.missing_days;
+              return acc;
+            }, {}) || {},
             data_available_from: gapData.date_range?.start || 'No data',
             data_available_until: gapData.date_range?.end || 'No data',
             total_data_points: gapData.total_actual_days || 0,

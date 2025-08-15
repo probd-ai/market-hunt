@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { SymbolMapping, StockDataStatistics, DownloadStockDataRequest, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
+import { SymbolMapping, SymbolMappingResponse, StockDataStatistics, DownloadStockDataRequest, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -43,13 +43,15 @@ export default function StocksPage() {
   const queryClient = useQueryClient();
 
   // Fetch symbol mappings
-  const { data: symbolMappings = [], isLoading: mappingsLoading, error: mappingsError } = useQuery({
+  const { data: symbolMappingsResponse, isLoading: mappingsLoading, error: mappingsError } = useQuery({
     queryKey: ['symbolMappings', { index_name: selectedIndex, mapped_only: mappedOnly }],
     queryFn: () => api.getSymbolMappings({ 
       index_name: selectedIndex || undefined, 
       mapped_only: mappedOnly 
     }),
   });
+
+  const symbolMappings = symbolMappingsResponse?.mappings || [];
 
   // Fetch stock statistics
   const { data: statistics, isLoading: statsLoading } = useQuery({
@@ -96,6 +98,11 @@ export default function StocksPage() {
     onSuccess: (gaps) => {
       setDataGaps(gaps);
       setShowGaps(gaps.length > 0);
+    },
+    onError: (error) => {
+      console.error('Gap analysis error:', error);
+      setDataGaps([]);
+      setShowGaps(false);
     },
   });
 
@@ -288,7 +295,13 @@ export default function StocksPage() {
         </Card>
         <Card className="p-6">
           <div className="text-2xl font-bold text-purple-600">
-            {(symbolMappings || []).length}
+            {symbolMappingsResponse?.total_mappings || '0'}
+          </div>
+          <div className="text-sm text-gray-600">Total Symbols</div>
+        </Card>
+        <Card className="p-6">
+          <div className="text-2xl font-bold text-green-600">
+            {symbolMappingsResponse?.mapped_count || '0'}
           </div>
           <div className="text-sm text-gray-600">Mapped Symbols</div>
         </Card>
@@ -359,8 +372,8 @@ export default function StocksPage() {
             {processingHistory.length === 0 ? (
               <p className="text-gray-500 text-center py-4">No processing history found</p>
             ) : (
-              processingHistory.map((process) => (
-                <div key={process._id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              processingHistory.map((process, index) => (
+                <div key={process._id || `process-${index}`} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                   <div className="flex items-center space-x-3">
                     {process.status === 'completed' ? (
                       <CheckCircleIcon className="h-5 w-5 text-green-600" />
@@ -851,7 +864,7 @@ export default function StocksPage() {
           </div>
         ) : mappingsError ? (
           <div className="text-red-600 py-4">
-            Error loading mappings: {mappingsError.message}
+            Error loading mappings: {String(mappingsError)}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -868,8 +881,8 @@ export default function StocksPage() {
                 </tr>
               </thead>
               <tbody>
-                {(symbolMappings || []).map((mapping) => (
-                  <tr key={mapping._id} className="hover:bg-gray-50">
+                {(symbolMappings || []).map((mapping, index) => (
+                  <tr key={`${mapping.symbol}-${index}`} className="hover:bg-gray-50">
                     <td className="border border-gray-300 px-4 py-2 font-medium">
                       {mapping.symbol}
                     </td>
@@ -895,8 +908,8 @@ export default function StocksPage() {
                       {mapping.nse_scrip_code}
                     </td>
                     <td className="border border-gray-300 px-4 py-2">
-                      <span className={`text-sm ${mapping.match_confidence >= 1 ? 'text-green-600' : 'text-orange-600'}`}>
-                        {(mapping.match_confidence * 100).toFixed(0)}%
+                      <span className={`text-sm ${mapping.match_confidence && mapping.match_confidence >= 1 ? 'text-green-600' : 'text-orange-600'}`}>
+                        {mapping.match_confidence ? (mapping.match_confidence * 100).toFixed(0) + '%' : 'N/A'}
                       </span>
                     </td>
                     <td className="border border-gray-300 px-4 py-2">
@@ -1017,8 +1030,8 @@ export default function StocksPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {priceData.slice(0, 100).map((record) => (
-                    <tr key={record._id} className="hover:bg-gray-50">
+                  {priceData.slice(0, 100).map((record, index) => (
+                    <tr key={record._id || `${record.symbol}-${record.date}-${index}`} className="hover:bg-gray-50">
                       <td className="border border-gray-300 px-4 py-2">
                         {new Date(record.date).toLocaleDateString()}
                       </td>
