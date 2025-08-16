@@ -22,12 +22,12 @@ import {
 } from '@heroicons/react/24/outline';
 
 type LoadMode = 'symbol' | 'index' | 'industry';
-type SyncMode = 'load' | 'sync' | 'refresh' | 'delete';
+type SyncMode = 'load' | 'refresh' | 'delete';
 
 export default function StocksPage() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('');
   const [downloadSymbol, setDownloadSymbol] = useState<string>('');
-  const [startDate, setStartDate] = useState<string>('2020-01-01');
+  const [startDate, setStartDate] = useState<string>('2020-01-01'); // Default to 2020 for realistic gap analysis
   const [endDate, setEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [selectedIndex, setSelectedIndex] = useState<string>('');
   const [selectedIndustry, setSelectedIndustry] = useState<string>('');
@@ -36,7 +36,6 @@ export default function StocksPage() {
   const [syncMode, setSyncMode] = useState<SyncMode>('load');
   const [activeTaskId, setActiveTaskId] = useState<string>('');
   const [showProgress, setShowProgress] = useState<boolean>(false);
-  const [showHistory, setShowHistory] = useState<boolean>(false);
   const [dataGaps, setDataGaps] = useState<DataGapInfo[]>([]);
   const [showGaps, setShowGaps] = useState<boolean>(false);
   
@@ -68,13 +67,6 @@ export default function StocksPage() {
 
   const priceData = priceDataResponse?.data || [];
 
-  // Fetch historical processing
-  const { data: processingHistory = [] } = useQuery({
-    queryKey: ['processingHistory'],
-    queryFn: () => api.getHistoricalProcessing(10),
-    enabled: showHistory,
-  });
-
   // Fetch progress updates for active task
   const { data: progressData } = useQuery({
     queryKey: ['taskProgress', activeTaskId],
@@ -95,11 +87,11 @@ export default function StocksPage() {
   const checkGapsMutation = useMutation({
     mutationFn: (request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string; start_date: string; end_date: string }) => 
       api.checkDataGaps(request),
-    onSuccess: (gaps) => {
+    onSuccess: (gaps: any) => {
       setDataGaps(gaps);
       setShowGaps(gaps.length > 0);
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('Gap analysis error:', error);
       setDataGaps([]);
       setShowGaps(false);
@@ -168,8 +160,8 @@ export default function StocksPage() {
       request.industry = selectedIndustry;
     }
 
-    // Auto-check gaps if in sync mode
-    if (syncMode === 'sync' || syncMode === 'load') {
+    // Auto-check gaps if in load mode
+    if (syncMode === 'load') {
       await handleCheckGaps();
     }
 
@@ -261,12 +253,12 @@ export default function StocksPage() {
         </div>
         <div className="flex gap-3">
           <Button
-            onClick={() => setShowHistory(!showHistory)}
+            onClick={() => window.location.href = '/scheduler'}
             variant="outline"
             className="bg-purple-50 hover:bg-purple-100 border-purple-200"
           >
             <ClockIcon className="h-4 w-4 mr-2" />
-            {showHistory ? 'Hide' : 'Show'} History
+            📋 Open Scheduler
           </Button>
           <Button
             onClick={handleRefreshMappings}
@@ -359,56 +351,6 @@ export default function StocksPage() {
 
             {progressData.error && (
               <p className="text-sm text-red-600">Error: {progressData.error}</p>
-            )}
-          </div>
-        </Card>
-      )}
-
-      {/* Historical Processing */}
-      {showHistory && (
-        <Card className="p-6">
-          <h2 className="text-xl font-semibold mb-4">Processing History</h2>
-          <div className="space-y-2">
-            {processingHistory.length === 0 ? (
-              <p className="text-gray-500 text-center py-4">No processing history found</p>
-            ) : (
-              processingHistory.map((process, index) => (
-                <div key={process._id || `process-${index}`} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div className="flex items-center space-x-3">
-                    {process.status === 'completed' ? (
-                      <CheckCircleIcon className="h-5 w-5 text-green-600" />
-                    ) : process.status === 'failed' ? (
-                      <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-                    ) : (
-                      <PlayIcon className="h-5 w-5 text-blue-600" />
-                    )}
-                    <div>
-                      <div className="font-medium">
-                        {process.request_type} - {
-                          process.request_params.symbol || 
-                          process.request_params.index_name || 
-                          process.request_params.industry
-                        }
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        {new Date(process.started_at).toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-sm font-medium">
-                      {process.items_processed} / {process.total_items}
-                    </div>
-                    <div className={`text-xs ${
-                      process.status === 'completed' ? 'text-green-600' :
-                      process.status === 'failed' ? 'text-red-600' :
-                      'text-blue-600'
-                    }`}>
-                      {process.status}
-                    </div>
-                  </div>
-                </div>
-              ))
             )}
           </div>
         </Card>
@@ -516,33 +458,26 @@ export default function StocksPage() {
               </div>
             </div>
 
-            {/* Sync Mode Selection */}
+            {/* Action Mode Selection */}
             <div>
               <label className="block text-sm font-medium mb-2">Action</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <Button
                   onClick={() => setSyncMode('load')}
                   variant={syncMode === 'load' ? 'primary' : 'outline'}
                   size="sm"
                   className="w-full bg-green-50 hover:bg-green-100 border-green-200"
+                  title="Smart load: Detects earliest missing data and downloads from there (upsert)"
                 >
                   <CloudArrowDownIcon className="h-4 w-4 mr-2" />
-                  Load
-                </Button>
-                <Button
-                  onClick={() => setSyncMode('sync')}
-                  variant={syncMode === 'sync' ? 'primary' : 'outline'}
-                  size="sm"
-                  className="w-full bg-blue-50 hover:bg-blue-100 border-blue-200"
-                >
-                  <ArrowPathIcon className="h-4 w-4 mr-2" />
-                  Sync
+                  Load & Sync
                 </Button>
                 <Button
                   onClick={() => setSyncMode('refresh')}
                   variant={syncMode === 'refresh' ? 'primary' : 'outline'}
                   size="sm"
                   className="w-full bg-yellow-50 hover:bg-yellow-100 border-yellow-200"
+                  title="Download all data from 2005 and replace existing (delete + insert)"
                 >
                   <ArrowPathIcon className="h-4 w-4 mr-2" />
                   Refresh
@@ -552,16 +487,16 @@ export default function StocksPage() {
                   variant={syncMode === 'delete' ? 'primary' : 'outline'}
                   size="sm"
                   className="w-full bg-red-50 hover:bg-red-100 border-red-200"
+                  title="Delete data for the specified period"
                 >
                   <TrashIcon className="h-4 w-4 mr-2" />
                   Delete
                 </Button>
               </div>
               <div className="text-xs text-gray-500 mt-1">
-                {syncMode === 'load' && 'Download new data (skip existing)'}
-                {syncMode === 'sync' && 'Fill missing dates automatically'}
-                {syncMode === 'refresh' && 'Delete and reload all data'}
-                {syncMode === 'delete' && 'Remove existing data only'}
+                {syncMode === 'load' && 'Smart load: Start from earliest missing year and sync forward (upsert)'}
+                {syncMode === 'refresh' && 'Complete refresh: Download all data from 2005 and replace existing (delete + insert)'}
+                {syncMode === 'delete' && 'Remove existing data for the specified period only'}
               </div>
             </div>
 
@@ -585,14 +520,12 @@ export default function StocksPage() {
                 disabled={!isFormValid() || loadDataMutation.isPending || deleteDataMutation.isPending}
                 className={`w-full ${
                   syncMode === 'load' ? 'bg-green-600 hover:bg-green-700' :
-                  syncMode === 'sync' ? 'bg-blue-600 hover:bg-blue-700' :
                   syncMode === 'refresh' ? 'bg-yellow-600 hover:bg-yellow-700' :
                   'bg-red-600 hover:bg-red-700'
                 }`}
               >
                 {loadDataMutation.isPending || deleteDataMutation.isPending ? 'Processing...' : 
-                 syncMode === 'load' ? 'Load Data' :
-                 syncMode === 'sync' ? 'Sync Data' :
+                 syncMode === 'load' ? 'Load & Sync Data' :
                  syncMode === 'refresh' ? 'Refresh Data' :
                  'Delete Data'}
               </Button>
@@ -657,10 +590,19 @@ export default function StocksPage() {
               </div>
             )}
 
-            {/* Enhanced Data Gaps Display with Yearly Breakdown */}
-            {showGaps && dataGaps.length > 0 && (
+            {/* Enhanced Data Gaps Display with Yearly Breakdown - Only show if there are actual gaps */}
+            {showGaps && dataGaps.length > 0 && dataGaps.some(gap => 
+              (gap.downloadable_gaps && gap.downloadable_gaps > 0) || 
+              (gap.user_range_gaps && gap.user_range_gaps > 0)
+            ) && (
               <div className="space-y-4">
-                {dataGaps.slice(0, 3).map((gap, index) => (
+                {dataGaps
+                  .filter(gap => 
+                    (gap.downloadable_gaps && gap.downloadable_gaps > 0) || 
+                    (gap.user_range_gaps && gap.user_range_gaps > 0)
+                  )
+                  .slice(0, 3)
+                  .map((gap, index) => (
                   <div key={index} className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
                     <div className="flex justify-between items-start mb-3">
                       <h4 className="font-medium text-yellow-800">⚠️ Data Gaps for {gap.symbol}</h4>
@@ -675,7 +617,7 @@ export default function StocksPage() {
                           <strong>Complete Period Analysis (2005-Present):</strong>
                         </div>
                         <div className="space-y-1 text-xs">
-                          <div>• Missing trading days: <span className="font-medium text-red-600">{gap.downloadable_gaps?.toLocaleString() || 0}</span></div>
+                          <div>• Missing trading days: <span className={`font-medium ${gap.downloadable_gaps && gap.downloadable_gaps > 0 ? 'text-red-600' : 'text-green-600'}`}>{gap.downloadable_gaps?.toLocaleString() || 0}</span></div>
                           <div>• Data available: {gap.data_available_from || 'None'} to {gap.data_available_until || 'None'}</div>
                           <div>• Available records: <span className="font-medium text-green-600">{gap.total_data_points?.toLocaleString() || 0}</span></div>
                           <div className="text-blue-600">• ✓ Comprehensive gap analysis from 2005</div>
@@ -696,8 +638,9 @@ export default function StocksPage() {
                       </div>
                     </div>
 
-                    {/* Yearly Gap Breakdown */}
-                    {gap.gaps_by_year && Object.keys(gap.gaps_by_year).length > 0 && (
+                    {/* Yearly Gap Breakdown - Only show if there are actual gaps */}
+                    {gap.gaps_by_year && Object.keys(gap.gaps_by_year).length > 0 && 
+                     Object.entries(gap.gaps_by_year).some(([year, count]) => count > 0) && (
                       <div className="p-3 bg-red-50 rounded text-xs mb-3 border border-red-200">
                         <div className="text-red-700 mb-2 font-medium">📊 Missing Trading Days by Year (2005-Present):</div>
                         <div className="text-xs text-red-600 mb-2">
@@ -705,6 +648,7 @@ export default function StocksPage() {
                         </div>
                         <div className="grid grid-cols-4 gap-2 max-h-32 overflow-y-auto">
                           {Object.entries(gap.gaps_by_year)
+                            .filter(([, count]) => count > 0) // Only show years with actual gaps
                             .sort(([a], [b]) => parseInt(b) - parseInt(a)) // Sort by year descending
                             .slice(0, 16) // Show more years since we expect many
                             .map(([year, count]) => (
@@ -714,13 +658,13 @@ export default function StocksPage() {
                               </div>
                             ))}
                         </div>
-                        {Object.keys(gap.gaps_by_year).length > 16 && (
+                        {Object.entries(gap.gaps_by_year).filter(([, count]) => count > 0).length > 16 && (
                           <div className="text-red-600 mt-2">
-                            ...and {Object.keys(gap.gaps_by_year).length - 16} more years with gaps
+                            ...and {Object.entries(gap.gaps_by_year).filter(([, count]) => count > 0).length - 16} more years with gaps
                           </div>
                         )}
                         <div className="text-blue-600 mt-2 text-xs bg-blue-50 p-2 rounded">
-                          💡 Tip: Use "Sync All Missing Data" to download complete historical data
+                          💡 Tip: Use &quot;Sync All Missing Data&quot; to download complete historical data
                         </div>
                       </div>
                     )}
@@ -876,7 +820,7 @@ export default function StocksPage() {
                   <th className="border border-gray-300 px-4 py-2 text-left">Industry</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">Indices</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">NSE Code</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left">Confidence</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Up-to-Date</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">Actions</th>
                 </tr>
               </thead>
@@ -908,8 +852,14 @@ export default function StocksPage() {
                       {mapping.nse_scrip_code}
                     </td>
                     <td className="border border-gray-300 px-4 py-2">
-                      <span className={`text-sm ${mapping.match_confidence && mapping.match_confidence >= 1 ? 'text-green-600' : 'text-orange-600'}`}>
-                        {mapping.match_confidence ? (mapping.match_confidence * 100).toFixed(0) + '%' : 'N/A'}
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                        mapping.is_up_to_date === true 
+                          ? 'bg-green-100 text-green-800' 
+                          : mapping.is_up_to_date === false 
+                            ? 'bg-red-100 text-red-800' 
+                            : 'bg-gray-100 text-gray-800'
+                      }`}>
+                        {mapping.is_up_to_date === true ? '✓ Yes' : mapping.is_up_to_date === false ? '✗ No' : 'Unknown'}
                       </span>
                     </td>
                     <td className="border border-gray-300 px-4 py-2">

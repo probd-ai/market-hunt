@@ -108,6 +108,7 @@ export interface SymbolMapping {
   nse_name: string | null;
   match_confidence: number | null;
   last_updated: string | null;
+  is_up_to_date?: boolean | null; // New field for up-to-date status based on gap analysis
 }
 
 export interface SymbolMappingResponse {
@@ -159,7 +160,7 @@ export interface DownloadStockDataRequest {
   industry?: string;
   start_date?: string;
   end_date?: string;
-  sync_mode?: 'load' | 'sync' | 'refresh' | 'delete';
+  sync_mode?: 'load' | 'refresh' | 'delete';
 }
 
 export interface ProgressUpdate {
@@ -236,4 +237,52 @@ export interface URLStatistics {
     index_name: string;
     last_downloaded: Date;
   }>;
+}
+
+// Scheduler Types
+export interface ProcessingDetail {
+  symbol: string;
+  status: 'success' | 'error' | 'skipped';
+  records_added?: number;
+  records_updated?: number;
+  records_skipped?: number;
+  processing_time?: string;
+  error_message?: string;
+}
+
+export interface ProcessEntry {
+  id: string;
+  type: string;
+  status: string;
+  symbol?: string;
+  index_name?: string;
+  industry?: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+  items_processed: number;
+  total_items: number;
+  current_item?: string;
+  error_message?: string;
+  processing_details?: ProcessingDetail[];
+  summary?: Record<string, any>;
+  request_type?: string;
+  request_params?: Record<string, any>;
+}
+
+export interface TaskProgress {
+  task_id: string;
+  status: string;
+  progress: number; // This is the percentage (0-100)
+  current_item?: string;
+  items_processed: number;
+  total_items: number;
+  start_time?: string;
+  estimated_completion?: string;
+}
+
+export interface SchedulerData {
+  pending: ProcessEntry[];
+  running: ProcessEntry[];
+  completed: ProcessEntry[];
 }

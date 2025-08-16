@@ -1,4 +1,4 @@
-import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, SymbolMappingResponse, StockPriceData, StockDataResponse, StockDataStatistics, DownloadStockDataRequest, SymbolMappingFilters, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
+import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, SymbolMappingResponse, StockPriceData, StockDataResponse, StockDataStatistics, DownloadStockDataRequest, SymbolMappingFilters, ProgressUpdate, HistoricalProcessing, DataGapInfo, ProcessEntry, TaskProgress, SchedulerData } from '@/types';
 
 const API_BASE = '/api';
 const BACKEND_API = 'http://localhost:3001/api';
@@ -106,23 +106,56 @@ class APIClient {
   }
 
   // Stock Data Management
-  async getSymbolMappings(filters?: SymbolMappingFilters): Promise<SymbolMappingResponse> {
+  async getSymbolMappings(filters?: SymbolMappingFilters & {
+    include_up_to_date?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<SymbolMappingResponse> {
     try {
-      const queryParams = new URLSearchParams();
-      if (filters?.mapped_only) queryParams.append('mapped_only', 'true');
-      if (filters?.index_name) queryParams.append('index_name', filters.index_name);
-      if (filters?.industry) queryParams.append('industry', filters.industry);
+      let url = '/stock/mappings';
+      const queryParams = [];
+      
+      if (filters?.index_name) {
+        queryParams.push(`index_filter=${encodeURIComponent(filters.index_name)}`);
+      }
+      if (filters?.mapped_only !== undefined) {
+        queryParams.push(`mapped_only=${filters.mapped_only}`);
+      }
+      if (filters?.include_up_to_date !== undefined) {
+        queryParams.push(`include_up_to_date=${filters.include_up_to_date}`);
+      }
+      if (filters?.limit !== undefined) {
+        queryParams.push(`limit=${filters.limit}`);
+      }
+      if (filters?.offset !== undefined) {
+        queryParams.push(`offset=${filters.offset}`);
+      }
+      
+      if (queryParams.length > 0) {
+        url += `?${queryParams.join('&')}`;
+      }
 
-      const url = `/stock/mappings${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
-      return await this.directRequest<SymbolMappingResponse>(url);
+      return await this.request<SymbolMappingResponse>(url);
     } catch (error) {
+      console.error('Failed to fetch symbol mappings:', error);
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch symbol mappings');
+    }
+  }
+
+  async updateUpToDateStatus(symbols?: string[]): Promise<{ success: boolean; message: string; updated_count: number }> {
+    try {
+      return await this.request(`/stock/mappings/update-status`, {
+        method: 'POST',
+        body: JSON.stringify({ symbols })
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to update up-to-date status');
     }
   }
 
   async refreshSymbolMappings(): Promise<{ success: boolean; message: string; total_mappings: number }> {
     try {
-      return await this.directRequest(`/stock/mappings/refresh`, {
+      return await this.request(`/stock/mappings/refresh`, {
         method: 'POST'
       });
     } catch (error) {
@@ -138,7 +171,7 @@ class APIClient {
       if (limit) params.append('limit', limit.toString());
 
       const url = `/stock/data/${encodeURIComponent(symbol)}${params.toString() ? `?${params.toString()}` : ''}`;
-      return await this.directRequest<StockDataResponse>(url);
+      return await this.request<StockDataResponse>(url);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch stock data');
     }
@@ -146,7 +179,7 @@ class APIClient {
 
   async getStockDataStatistics(): Promise<StockDataStatistics> {
     try {
-      return await this.directRequest<StockDataStatistics>('/stock/statistics');
+      return await this.request<StockDataStatistics>('/stock/statistics');
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch stock data statistics');
     }
@@ -190,7 +223,9 @@ class APIClient {
           user_range_end: request.end_date,
           user_range_gaps: gapData.total_missing_days || 0,
           gaps_by_year: gapData.yearly_breakdown?.reduce((acc: any, year: any) => {
-            acc[year.year] = year.missing_days;
+            if (year.missing_days > 0) { // Only include years with actual gaps
+              acc[year.year] = year.missing_days;
+            }
             return acc;
           }, {}) || {},
           data_available_from: gapData.date_range?.start || request.start_date,
@@ -251,7 +286,7 @@ class APIClient {
     }
     
     try {
-      const response: any = await this.directRequest('/stock/download', {
+      const response: any = await this.request('/stock/download', {
         method: 'POST',
         body: JSON.stringify(legacyRequest),
       });
@@ -267,15 +302,105 @@ class APIClient {
   }
 
   async getHistoricalProcessing(limit: number = 10): Promise<HistoricalProcessing[]> {
-    // Stub implementation - returns empty array for now
-    // TODO: Implement backend endpoint /api/stock/history
-    return [];
+    // Legacy compatibility - returns completed processes from scheduler
+    try {
+      const schedulerData = await this.getAllProcesses();
+      return schedulerData.completed.slice(-limit).map(process => ({
+        _id: process.id,
+        task_id: process.id,
+        request_type: process.type.includes('symbol') ? 'symbol' as const : 
+                     process.type.includes('index') ? 'index' as const : 'industry' as const,
+        request_params: {
+          symbol: process.symbol,
+          index_name: process.index_name,
+          industry: process.industry,
+          start_date: new Date().toISOString(),
+          end_date: new Date().toISOString(),
+          force_refresh: false
+        },
+        status: process.status as 'pending' | 'running' | 'completed' | 'failed',
+        progress_percentage: process.total_items > 0 ? (process.items_processed / process.total_items) * 100 : 0,
+        items_processed: process.items_processed,
+        total_items: process.total_items,
+        started_at: new Date(process.started_at || process.created_at),
+        completed_at: process.completed_at ? new Date(process.completed_at) : undefined,
+        error_message: process.error_message,
+        processed_symbols: [], // Not tracked in current scheduler
+        failed_symbols: [] // Not tracked in current scheduler
+      }));
+    } catch (error) {
+      console.error('Failed to get historical processing:', error);
+      return [];
+    }
   }
 
   async getTaskProgress(taskId: string): Promise<ProgressUpdate | null> {
-    // Stub implementation - returns null for now
-    // TODO: Implement backend endpoint /api/stock/tasks/{taskId}/progress
-    return null;
+    try {
+      const progressData = await this.getProcessProgress(taskId);
+      return {
+        task_id: progressData.task_id,
+        status: progressData.status as 'pending' | 'running' | 'completed' | 'failed',
+        progress_percentage: progressData.progress,
+        current_count: progressData.items_processed,
+        total_count: progressData.total_items,
+        current_item: progressData.current_item,
+        started_at: progressData.start_time ? new Date(progressData.start_time) : new Date(),
+        completed_at: progressData.estimated_completion ? new Date(progressData.estimated_completion) : undefined
+      };
+    } catch (error) {
+      console.error('Failed to get task progress:', error);
+      return null;
+    }
+  }
+
+  // New Scheduler API Methods
+  async getAllProcesses(): Promise<SchedulerData> {
+    try {
+      return await this.request<SchedulerData>('/scheduler/processes');
+    } catch (error) {
+      console.error('Failed to get all processes:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to get processes');
+    }
+  }
+
+  async getProcessProgress(processId: string): Promise<TaskProgress> {
+    try {
+      return await this.request<TaskProgress>(`/scheduler/processes/${processId}/progress`);
+    } catch (error) {
+      console.error('Failed to get process progress:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to get process progress');
+    }
+  }
+
+  async cancelProcess(processId: string): Promise<{ message: string }> {
+    try {
+      return await this.request<{ message: string }>(`/scheduler/processes/${processId}/cancel`, {
+        method: 'POST'
+      });
+    } catch (error) {
+      console.error('Failed to cancel process:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to cancel process');
+    }
+  }
+
+  async deleteProcess(processId: string): Promise<{ message: string }> {
+    try {
+      return await this.request<{ message: string }>(`/scheduler/processes/${processId}`, {
+        method: 'DELETE'
+      });
+    } catch (error) {
+      console.error('Failed to delete process:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to delete process');
+    }
+  }
+
+  async getProcessDetails(processId: string): Promise<ProcessEntry> {
+    try {
+      return await this.request<ProcessEntry>(`/scheduler/processes/${processId}/details`);
+    } catch (error) {
+      console.error('Failed to get process details:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to get process details');
+    }
   }
 
   async deleteStockData(request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string }): Promise<{ success: boolean; message: string; deleted_count: number }> {
@@ -292,7 +417,7 @@ class APIClient {
   // Index and industry data methods
   async getIndexIndustries(indexName: string): Promise<any> {
     try {
-      return await this.directRequest(`/data/index/${encodeURIComponent(indexName)}/industries`);
+      return await this.request(`/data/index/${encodeURIComponent(indexName)}/industries`);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get index industries');
     }
@@ -300,7 +425,7 @@ class APIClient {
 
   async getIndexIndustryCompanies(indexName: string, industryName: string): Promise<any> {
     try {
-      return await this.directRequest(`/data/index/${encodeURIComponent(indexName)}/industries/${encodeURIComponent(industryName)}`);
+      return await this.request(`/data/index/${encodeURIComponent(indexName)}/industries/${encodeURIComponent(industryName)}`);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get index industry companies');
     }
@@ -308,7 +433,7 @@ class APIClient {
 
   async getIndustriesOverview(): Promise<any> {
     try {
-      return await this.directRequest('/industries');
+      return await this.request('/industries');
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get industries overview');
     }
@@ -316,7 +441,7 @@ class APIClient {
 
   async getIndustryCompanies(industryName: string): Promise<any> {
     try {
-      return await this.directRequest(`/industries/${encodeURIComponent(industryName)}`);
+      return await this.request(`/industries/${encodeURIComponent(industryName)}`);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get industry companies');
     }
@@ -324,7 +449,7 @@ class APIClient {
 
   async getIndustryIndices(industryName: string): Promise<any> {
     try {
-      return await this.directRequest(`/industries/${encodeURIComponent(industryName)}/indices`);
+      return await this.request(`/industries/${encodeURIComponent(industryName)}/indices`);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get industry indices');
     }
@@ -332,7 +457,7 @@ class APIClient {
 
   async getIndustryIndexCompanies(industryName: string, indexName: string): Promise<any> {
     try {
-      return await this.directRequest(`/industries/${encodeURIComponent(industryName)}/indices/${encodeURIComponent(indexName)}`);
+      return await this.request(`/industries/${encodeURIComponent(industryName)}/indices/${encodeURIComponent(indexName)}`);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to get industry index companies');
     }

@@ -1,353 +1,53 @@
-# 🧬 Project DNA - Market Hunt
+r application shutdown.
+# Project DNA - Market Hunt
 
-*Last Updated: 2025-08-16 07:38*  
-*Status: **ENTERPRISE-READY** - Full-Stack Market Research Platform*
+*Last Updated: 2025-08-15 18:30*  
+*Status: **SCHEDULER SYSTEM IMPLEMENTED** - Process Queue Management Active*
 
-## 🆕 Latest Enhancement (2025-08-16 07:38)
+## 🚀 **SCHEDULER FUNCTIONALITY OPERATIONAL**
 
-### **🚀 Performance Optimization & Data Integrity Enhancement - COMPLETED**
+### **Latest Implementation Completed (2025-08-15 18:30)**
 
-**Major Breakthrough:** System now handles 761,927+ stock records with sub-second response times through intelligent performance optimization and comprehensive data integrity improvements.
+**✅ SCHEDULER BACKEND API ENDPOINTS IMPLEMENTED**
+**✅ SCHEDULER FRONTEND PAGE CREATED**  
+**✅ PROCESS TRACKING INTEGRATED WITH DOWNLOADS**
+**✅ REAL-TIME PROGRESS MONITORING ENABLED**
 
-#### **🎯 What's New:**
-- **✅ Performance-Optimized Symbol Mappings**: New `/api/stock/mappings` endpoint with optional `include_up_to_date` parameter for intelligent loading (1s fast vs 2.5s with status)
-- **✅ Advanced Pagination System**: Limit/offset parameters supporting efficient data browsing with configurable page sizes
-- **✅ Data Integrity Management**: Automated duplicate detection and resolution with `/api/stock/mappings/fix-duplicates` endpoint
-- **✅ Batch Status Updates**: Background processing endpoint `/api/stock/mappings/update-status` for bulk operations
-- **✅ Enhanced Frontend Integration**: Updated API client supporting all new performance parameters and error handling
+#### **🎯 Scheduler System Architecture**
+**New Feature:** Complete process queue management with real-time progress tracking
+**Implementation:** Backend scheduler API + Frontend scheduler page + Download integration
+**Status:** Operational with auto-refresh capabilities
 
-#### **🔍 Technical Implementation:**
 ```python
-# Performance-Optimized Endpoint with Optional Status Calculation
-@router.get("/mappings")
-async def get_symbol_mappings(
-    limit: int = Query(50, description="Number of mappings to return"),
-    offset: int = Query(0, description="Number of mappings to skip"),
-    include_up_to_date: bool = Query(False, description="Include up-to-date status (slower)")
-):
-    # Fast path: ~1s response time
-    if not include_up_to_date:
-        return await stock_manager.get_symbol_mappings_fast(limit, offset)
-    
-    # Detailed path: ~2.5s with gap analysis
-    return await stock_manager.get_symbol_mappings_with_status(limit, offset)
+# Backend Scheduler Components (api_server.py)
+# In-memory process tracking
+process_queue = []           # Pending processes
+running_processes = {}       # Currently executing processes  
+completed_processes = []     # Finished processes (success/failed)
+
+# Scheduler API Endpoints
+GET /api/scheduler/processes                    # Get all processes by status
+GET /api/scheduler/processes/{id}/progress      # Get detailed progress
+POST /api/scheduler/processes/{id}/cancel       # Cancel pending/running process
+DELETE /api/scheduler/processes/{id}            # Delete completed process
+
+# Process Entry Model
+ProcessEntry:
+  - id: Unique process identifier
+  - type: symbol_download, index_download, industry_download
+  - status: pending, running, completed, failed, cancelled
+  - symbol/index_name/industry: Target data entity
+  - items_processed/total_items: Progress tracking
+  - started_at/completed_at: Timestamps
+  - error_message: Failure details
 ```
 
-#### **🎨 User Experience:**
-- **Instant Loading**: Default symbol mappings load in ~1 second for immediate productivity
-- **Optional Details**: Users can choose to load detailed up-to-date status when needed
-- **Smart Pagination**: Configurable page sizes (10, 25, 50, 100) for optimal browsing experience
-- **Data Quality Assurance**: Automated duplicate detection with one-click resolution
-- **Real-time Updates**: Batch processing with progress tracking for large operations
-
-#### **📊 System Scale Results:**
-- **✅ Total Records**: 761,927 stock price records across 5 partitioned collections
-- **✅ Active Symbols**: 199 symbols with complete historical data
-- **✅ Data Range**: 20+ years (January 3, 2005 → August 14, 2025)
-- **✅ Symbol Mappings**: 200 symbols with multi-index support and NSE integration
-- **✅ Performance**: Sub-second response times for standard operations
-- **✅ Data Integrity**: Zero duplicate NSE codes, automated validation
-
-### **Previous Enhancement (2025-08-15 23:50)**
-
-### **✨ Detailed Process Results Implementation - COMPLETED**
-
-**New Feature:** After process completion, users can now click on completed processes to view comprehensive processing details including per-stock statistics.
-
-#### **🎯 What's New:**
-- **✅ Detailed Results API**: New `/api/scheduler/processes/{id}/details` endpoint returning comprehensive processing statistics
-- **✅ Enhanced ProcessEntry Model**: Extended with `processing_details` and `summary` fields for complete result tracking
-- **✅ Per-Symbol Processing Stats**: Individual symbol results showing records added/updated/skipped and processing time
-- **✅ Process Summary Analytics**: Aggregated statistics including success rates, total records processed, and performance metrics
-- **✅ Frontend UI Integration**: "View Details" button on completed processes with expandable detailed results table
-- **✅ Real-time Data Collection**: Background tasks now capture detailed processing metrics during execution
-
-#### **🔍 Technical Implementation:**
 ```typescript
-// Enhanced ProcessEntry with detailed results
-interface ProcessEntry {
-  processing_details: ProcessingDetail[];  // Per-symbol results
-  summary: {                              // Aggregated statistics
-    total_symbols: number;
-    successful_symbols: number;
-    failed_symbols: number;
-    total_records_added: number;
-    total_records_updated: number;
-    total_records_skipped: number;
-  };
-}
-
-// Individual symbol processing result
-interface ProcessingDetail {
-  symbol: string;
-  status: 'success' | 'error' | 'skipped';
-  records_added: number;
-  records_updated: number;
-  records_skipped: number;
-  processing_time: string;
-  error_message?: string;
-}
-```
-
-#### **🎨 User Experience:**
-- **Enhanced Scheduler Page**: Completed processes now show "View Details" button with expand/collapse functionality
-- **Comprehensive Results Table**: Detailed table showing per-symbol processing statistics (symbol, status, records added/updated/skipped, processing time)
-- **Summary Statistics**: Visual cards showing aggregated processing metrics and success rates
-- **Error Reporting**: Clear display of processing errors with specific error messages per symbol
-- **Processing Performance**: Individual symbol processing times for performance analysis
-
-#### **📊 Verification Results:**
-- **✅ Symbols Download**: 2 symbols processed with detailed per-symbol results collected
-- **✅ Index Download**: 50 symbols (NIFTY 50) processed with comprehensive statistics
-- **✅ API Endpoint**: `/api/scheduler/processes/process_2/details` returning full processing details
-- **✅ Frontend Integration**: Scheduler page displaying detailed results in user-friendly format
-- **✅ Performance Tracking**: Individual symbol processing times and success rates captured
-
----
-
-## 🎯 What This System Does
-
-**Market Hunt** is a comprehensive stock market data management platform that:
-- Downloads and manages NSE (Indian Stock Exchange) data
-- Provides multi-index company analysis (NIFTY 50, 100, 200, MIDCAP 50)
-- Offers real-time industry classification and cross-referencing
-- Enables automated data synchronization from multiple sources
-- Features advanced stock data management with gap detection
-
-## 🏗️ System Architecture
-
-### **Technology Stack**
-- **Backend**: Python 3.13 + FastAPI + MongoDB
-- **Frontend**: Next.js 15.4.6 + TypeScript + Tailwind CSS
-- **Database**: MongoDB (10 collections, 762,127 total documents)
-- **Infrastructure**: Virtual environment + background services
-
-### **Service Deployment**
-```bash
-# Backend API Server
-Port: 3001
-Command: nohup uvicorn api_server:app --host 0.0.0.0 --port 3001 --reload
-Status: ✅ Active (Background)
-Log: fastapi.log
-
-# Frontend Web Server  
-Port: 3000
-Command: nohup npm run dev
-Status: ✅ Active (Background) 
-Log: frontend.log
-
-# Database
-Port: 27017 (MongoDB)
-Status: ✅ Active
-Database: market_hunt
-```
-
-## 📁 Core System Components
-
-### **Backend Core Files**
-| File | Purpose | Key Features |
-|------|---------|--------------|
-| `api_server.py` | FastAPI backend server | 25+ REST endpoints, scheduler system |
-| `stock_data_manager.py` | Stock data operations | 5-year partitioning, NSE integration |
-| `nse_data_client.py` | NSE API client | Session management, data fetching |
-| `url_manager.py` | URL configuration | CRUD operations, validation |
-| `generic_data_loader.py` | CSV data processing | MongoDB integration, bulk loading |
-
-### **Frontend Pages**
-| Route | Component | Features |
-|-------|-----------|----------|
-| `/` | Dashboard | Real-time metrics, system overview |
-| `/stocks` | Stock Management | Advanced data loading, progress tracking |
-| `/urls` | URL Management | Complete CRUD, validation |
-| `/indexes` | Index Analysis | Multi-level navigation, industry breakdown |
-| `/industries` | Industry Overview | Cross-reference analysis, index mapping |
-| `/scheduler` | Process Scheduler | Queue management, real-time progress |
-
-### **Database Collections (MongoDB)**
-| Collection | Documents | Purpose |
-|------------|-----------|---------|
-| `prices_2020_2024` | 223,832 | Recent stock price data |
-| `prices_2015_2019` | 190,583 | Historical prices (2015-2019) |
-| `prices_2010_2014` | 174,472 | Historical prices (2010-2014) |
-| `prices_2005_2009` | 142,154 | Historical prices (2005-2009) |
-| `prices_2025_2029` | 30,886 | Current year data |
-| `index_meta` | 350 | Company & index mappings |
-| `symbol_mappings` | 200 | NSE symbol mappings |
-| `data_processing_logs` | 143 | Processing history |
-| `stock_metadata` | 58 | Stock metadata |
-| `index_meta_csv_urls` | 3 | URL configurations |
-
-## 🔗 API Endpoints Summary
-
-### **Stock Data Management**
-```
-GET    /api/stock/statistics        # System-wide statistics
-GET    /api/stock/mappings         # Symbol mappings with pagination & optional status
-POST   /api/stock/mappings/refresh # Refresh NSE mappings  
-POST   /api/stock/mappings/fix-duplicates # Fix duplicate NSE codes
-POST   /api/stock/mappings/update-status  # Batch status updates
-GET    /api/stock/data/{symbol}    # Historical price data
-POST   /api/stock/download         # Background download tasks
-POST   /api/stock/gaps            # Data gap analysis
-```
-
-### **Index & Industry Analytics**
-```
-GET    /api/data                   # Index overview
-GET    /api/data/index/{name}      # Index constituents
-GET    /api/industries            # Industry overview  
-GET    /api/industries/{name}     # Industry companies
-```
-
-### **URL & Process Management**
-```
-GET    /api/urls                  # List configured URLs
-POST   /api/urls                  # Add new data source
-PUT    /api/urls/{id}             # Update URL config
-DELETE /api/urls/{id}             # Remove data source
-POST   /api/process               # Process all URLs
-```
-
-### **Scheduler System**
-```
-GET    /api/scheduler/processes            # Get all processes
-GET    /api/scheduler/processes/{id}/progress  # Real-time progress tracking
-GET    /api/scheduler/processes/{id}/details   # Detailed processing results ✨ NEW
-POST   /api/scheduler/processes/{id}/cancel    # Cancel process
-DELETE /api/scheduler/processes/{id}        # Delete process
-```
-
-## 🚀 Infrastructure Management
-
-### **Start/Stop System**
-```bash
-# Start both services (background)
-cd /media/guru/Data/workspace/market_hunt
-nohup /media/guru/Data/workspace/market_hunt/.venv/bin/python -m uvicorn api_server:app --host 0.0.0.0 --port 3001 --reload > fastapi.log 2>&1 &
-cd frontend && nohup npm run dev > ../frontend.log 2>&1 &
-
-# Stop all services
-pkill -f "uvicorn|next dev"
-
-# Check service status
-ss -tulpn | grep -E ":3000|:3001"
-ps aux | grep -E "(uvicorn|next)" | grep -v grep
-```
-
-### **Monitor System**
-```bash
-# Check logs
-tail -f fastapi.log
-tail -f frontend.log
-
-# Test API health
-curl http://localhost:3001/health
-curl http://localhost:3001/api/stock/statistics
-
-# Access interfaces
-Frontend: http://localhost:3000
-API Docs: http://localhost:3001/docs
-Network: http://192.168.29.203:3000
-```
-
-## 🔧 Key Integrations
-
-### **NSE India API Integration**
-- **Session Management**: Automatic session handling with retries
-- **Data Sources**: Equity masters, historical price data
-- **Rate Limiting**: Built-in request throttling
-- **Error Handling**: Comprehensive error recovery
-
-### **MongoDB Integration**
-- **Data Partitioning**: 5-year price data partitions for performance
-- **Multi-Index Support**: Symbols can belong to multiple indices
-- **Real-time Updates**: Live data synchronization
-- **Query Optimization**: Indexed collections for fast retrieval
-
-### **Frontend-Backend Integration**  
-- **API Proxy**: Next.js proxy for seamless integration
-- **Type Safety**: Full TypeScript integration
-- **Real-time Updates**: Auto-refresh capabilities
-- **Error Handling**: Comprehensive error boundaries
-
-## 🎯 Current System Capabilities
-
-### **✅ Fully Operational Features**
-1. **Stock Data Management**: Download, sync, gap analysis, progress tracking
-2. **Index Analysis**: Multi-level navigation (Index → Industries → Companies)
-3. **Industry Classification**: 18+ sectors with cross-reference analysis
-4. **URL Management**: Complete CRUD operations with validation
-5. **Process Scheduling**: Queue management with real-time monitoring
-6. **Data Analytics**: Statistical insights and gap detection
-7. **Background Processing**: Non-blocking task execution
-8. **Multi-Source Data**: CSV URLs, NSE APIs, manual imports
-
-### **📊 Current Data Metrics**
-- **Total Records**: 762,127 documents across 10 collections
-- **Price Data**: 761,927 historical records (2005-2025)
-- **Active Symbols**: 199 symbols with complete historical data
-- **Symbol Mappings**: 200 NSE symbol mappings
-- **Industries**: 18+ distinct sectors
-- **Data Sources**: 3 configured and validated URLs
-
-## 🔄 Development Workflow
-
-### **Adding New Features**
-1. **Backend**: Add endpoints to `api_server.py`
-2. **Frontend**: Create/update pages in `src/app/`
-3. **Database**: Use existing collections or create new ones
-4. **Testing**: Run `test_stock_system.py` for validation
-
-### **Data Management**
-1. **Add Data Sources**: Use URL Management interface
-2. **Process Data**: Background tasks with progress tracking  
-3. **Monitor System**: Real-time dashboards and logs
-4. **Backup**: Automated document backups in `archived/`
-
-### **Deployment Notes**
-- **Development**: Hot reload enabled for both services
-- **Production**: Background services with nohup
-- **Network**: LAN access configured
-- **Logs**: Centralized logging with rotation
-
-## 📋 Important Notes
-
-### **System Dependencies**
-- **Python Environment**: Virtual environment (`.venv`) required
-- **MongoDB**: Must be running on localhost:27017
-- **Node.js**: Required for frontend development
-- **Network Access**: Both localhost and LAN configured
-
-### **Data Integrity**
-- **Multi-Index Support**: Symbols can belong to multiple indices
-- **Date Partitioning**: Data organized by 5-year periods
-- **Validation**: Comprehensive data quality checks
-- **Backup Strategy**: Regular backups in `archived/` folder
-
-### **Performance Optimization**
-- **Database Indexing**: Optimized for fast queries
-- **API Caching**: Response caching where appropriate
-- **Background Processing**: Non-blocking operations
-- **Batch Operations**: Efficient bulk data processing
-
----
-
-## 🎉 Production Status
-
-**✅ SYSTEM FULLY OPERATIONAL**
-- All services running in background mode
-- Complete frontend-backend integration
-- Real-time data synchronization
-- Comprehensive error handling
-- Network accessibility enabled
-- Development workflow maintained
-
-**Access URLs:**
-- **Frontend**: http://localhost:3000
-- **API Documentation**: http://localhost:3001/docs  
-- **Network Access**: http://192.168.29.203:3000
-
-*This system is production-ready and actively maintaining 13,889+ financial records with real-time processing capabilities.*
+// Frontend Scheduler Page (/scheduler)
+SchedulerPage Components:
+  - Summary cards showing counts by status
+  - Real-time process list with progress bars
+  - Auto-refresh toggle (3-second intervals)
   - Process management (cancel, delete, retry)
   - Duration tracking and ETA calculations
 
@@ -1227,17 +927,16 @@ market_hunt/
 - **🔗 URL Management**: Complete CRUD with validation  
 - **📈 Index Analysis**: Multi-level navigation with cross-references
 - **🏭 Industry Overview**: Comprehensive sector analysis
-- **🔧 API Backend**: 25+ endpoints with documentation
-- **💾 Database**: 762,127+ documents with optimized performance
+- **🔧 API Backend**: 20+ endpoints with documentation
+- **💾 Database**: 6,914+ documents with optimized performance
 
 ### **📊 Current Data Metrics:**
-- **Total Records**: 762,127 documents across 10 collections
-- **Symbol Mappings**: 200 symbols with multi-index support
-- **Price Data**: 761,927 historical records (2005-2025)
-- **Active Symbols**: 199 symbols with complete historical data
+- **Total Records**: 6,914 documents across 7 collections
+- **Symbol Mappings**: 400 symbols with multi-index support
+- **Price Data**: 6,514 historical records (2005-2025)
 - **Industries**: 18 sectors with complete company mapping
 - **Indices**: 4 major indices with constituent tracking
-- **Data Sources**: 3+ configured and validated URLs
+- **Data Sources**: 2+ configured and validated URLs
 
 ### **🌐 Live Service Status:**
 - **✅ Frontend**: http://localhost:3000 (Next.js 15.4.6)
@@ -1249,8 +948,8 @@ market_hunt/
 
 ---
 
-*Last Updated: 2025-08-16 07:38*  
-*Status: **ENTERPRISE-READY** - Full-Stack Market Research Platform*  
+*Last Updated: 2025-08-15 21:15*  
+*Status: **PRODUCTION READY** - Complete Stock Data Management System*  
 *Next Update: Based on user requirements and feedback*
 
 **🎉 ACHIEVEMENT UNLOCKED: Full-Stack Market Research Platform with Advanced Stock Data Management - ALL FUNCTIONALITIES OPERATIONAL**
@@ -1359,165 +1058,3 @@ market_hunt/
 - **Development Continuity**: Hot reload maintains development workflow in production
 - **Logging System**: Comprehensive log files for debugging and monitoring
 - **Network Configuration**: Both local and LAN access configured properly
-
----
-
-## 🧠 Critical Development Learnings & Patterns
-
-*Key insights from gap analysis display bug fixes and system evolution*
-
-### **🔧 Frontend-Backend Data Transformation Issues**
-
-#### **Learning: API Response Structure Mismatches**
-**Problem Pattern**: Backend returns different data structure than frontend expects
-**Example**: Backend returns `yearly_breakdown` array, frontend expects `gaps_by_year` object
-
-**Solution Pattern**: Always validate data transformations in API client layer
-```typescript
-// ❌ Direct assignment without validation
-gaps_by_year: response.yearly_breakdown
-
-// ✅ Proper transformation with filtering
-gaps_by_year: response.yearly_breakdown?.reduce((acc, year) => {
-  if (year.missing_days > 0) { // Only include meaningful data
-    acc[year.year] = year.missing_days;
-  }
-  return acc;
-}, {}) || {}
-```
-
-#### **Learning: Display Logic Should Match Data Reality**
-**Problem Pattern**: UI checks for object existence, not actual content significance
-**Example**: Showing red warnings when `gaps_by_year` exists but contains only zeros
-
-**Solution Pattern**: Check for meaningful content, not just existence
-```tsx
-// ❌ Shows warnings for empty data
-{gap.gaps_by_year && Object.keys(gap.gaps_by_year).length > 0 && (
-
-// ✅ Only shows warnings when there are actual issues
-{gap.gaps_by_year && Object.keys(gap.gaps_by_year).length > 0 && 
- Object.entries(gap.gaps_by_year).some(([year, count]) => count > 0) && (
-```
-
-### **🎨 Smart UI State Management**
-
-#### **Learning: Conditional Color Coding Based on Data Values**
-**Problem Pattern**: Static styling regardless of data state
-**Solution Pattern**: Dynamic styling based on actual values
-```tsx
-// ❌ Always red regardless of value
-<span className="text-red-600">{value}</span>
-
-// ✅ Color reflects data meaning
-<span className={`${value > 0 ? 'text-red-600' : 'text-green-600'}`}>
-  {value}
-</span>
-```
-
-#### **Learning: Filter Display Arrays Before Rendering**
-**Problem Pattern**: Showing all data items regardless of relevance
-**Solution Pattern**: Filter data arrays to only show meaningful items
-```tsx
-// ❌ Shows all items including empty ones
-{dataItems.map(item => <Component item={item} />)}
-
-// ✅ Only shows items with meaningful content
-{dataItems.filter(item => item.hasContent).map(item => <Component item={item} />)}
-```
-
-### **🔄 Data-Driven Approach Over Hardcoded Assumptions**
-
-#### **Learning: Use Actual Database Content for Business Logic**
-**Context**: Initially implemented hardcoded Indian holiday calendar without user input
-**Solution**: Extract trading calendar from actual symbol data in database
-
-**Key Pattern**: When implementing domain-specific logic, derive rules from actual data
-```python
-# ❌ Hardcoded business rules
-indian_holidays = ["2024-01-26", "2024-08-15", ...]  # Assumed data
-
-# ✅ Data-driven business rules
-def _get_real_trading_calendar(self, symbols_in_db):
-    # Extract actual trading patterns from existing data
-    real_trading_dates = self._analyze_trading_patterns(symbols_in_db)
-    return real_trading_dates
-```
-
-### **🧪 Testing & Validation Patterns**
-
-#### **Learning: Test End-to-End Data Flow During Bug Fixes**
-**Process**:
-1. Test backend API directly: `curl http://localhost:3001/api/endpoint`
-2. Test frontend proxy: `curl http://localhost:3000/api/endpoint`  
-3. Test UI state: Inspect frontend display logic
-4. Validate data transformations at each layer
-
-#### **Learning: Service Restart Order Matters**
-**Pattern**: When deploying fixes affecting both frontend and backend:
-1. Stop all services: `pkill -f "uvicorn|next dev"`
-2. Start backend first: `nohup uvicorn api_server:app ...`
-3. Start frontend second: `nohup npm run dev ...`
-4. Verify both are healthy before testing
-
-### **📝 Code Quality & Maintenance**
-
-#### **Learning: TypeScript Error Management in Large Codebases**
-**Pattern**: When fixing critical display bugs, prioritize functional fixes over TypeScript strictness
-```typescript
-// Temporary solution for critical fixes
-onSuccess: (gaps: any) => { // Use 'any' temporarily
-
-// Later improvement with proper typing
-interface GapAnalysisResponse {
-  gaps: DataGapInfo[];
-  // ... proper interface definition
-}
-```
-
-#### **Learning: Progressive Enhancement for UI Fixes**
-**Pattern**: Fix most critical user-facing issues first, then improve code quality
-1. **Critical**: Remove misleading red warnings when data is good
-2. **Important**: Implement proper data filtering and color coding  
-3. **Enhancement**: Add proper TypeScript interfaces and error handling
-
-### **🔐 Production Deployment Lessons**
-
-#### **Learning: Background Service Management**
-**Pattern**: Use nohup for persistent services that survive terminal closure
-```bash
-# ✅ Proper background deployment
-nohup uvicorn api_server:app --host 0.0.0.0 --port 3001 --reload > fastapi.log 2>&1 &
-nohup npm run dev > frontend.log 2>&1 &
-
-# Monitor with
-ps aux | grep -E "(uvicorn|next)" | grep -v grep
-```
-
-#### **Learning: Log File Strategy**
-**Pattern**: Separate log files for each service enable independent debugging
-- `fastapi.log` - Backend API issues and database errors
-- `frontend.log` - Frontend compilation and Next.js issues
-
-### **⚡ Performance & User Experience**
-
-#### **Learning: Data-Driven Calendar Generation**
-**Achievement**: 100% trading day coverage using real database symbols instead of guessed holidays
-**Key Insight**: Real market data is more reliable than external holiday calendars
-
-#### **Learning: Smart Auto-Download Integration**
-**Pattern**: Combine gap analysis with auto-download for seamless user experience
-```python
-async def analyze_data_gaps(self, symbol, start_date, end_date, auto_download=False):
-    # Analyze first
-    gaps = await self._calculate_gaps(symbol, start_date, end_date)
-    
-    # Auto-fix if requested and gaps are significant
-    if auto_download and gaps.coverage_percentage < 10:
-        await self._download_missing_data(symbol, gaps.missing_ranges)
-        gaps = await self._calculate_gaps(symbol, start_date, end_date)  # Re-analyze
-    
-    return gaps
-```
-
----

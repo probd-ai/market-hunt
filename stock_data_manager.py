@@ -341,14 +341,79 @@ class StockDataManager:
         
         return result
     
+    async def _get_earliest_missing_year(self, symbol: str) -> int:
+        """Find the earliest year with missing data for smart loading"""
+        try:
+            # Start from 2005 (our earliest data year)
+            current_year = datetime.now().year
+            
+            for year in range(2005, current_year + 1):
+                # Check if we have any data for this year
+                year_start = datetime(year, 1, 1)
+                year_end = datetime(year, 12, 31)
+                
+                existing_data = await self.get_price_data(
+                    symbol=symbol,
+                    start_date=year_start,
+                    end_date=year_end,
+                    limit=1  # Just check if any data exists
+                )
+                
+                if not existing_data:
+                    # Found the first year with no data
+                    logger.info(f"📊 Earliest missing year for {symbol}: {year}")
+                    return year
+            
+            # If we reach here, all years have some data, check for gaps in current year
+            logger.info(f"📊 All years have data for {symbol}, checking current year gaps")
+            return current_year
+            
+        except Exception as e:
+            logger.error(f"Error finding earliest missing year for {symbol}: {e}")
+            return 2005  # Default fallback
+    
+    async def _delete_symbol_data(self, symbol: str, start_date: datetime, end_date: datetime):
+        """Delete existing data for a symbol in the given date range"""
+        try:
+            # Get year range for partitioned collections
+            start_year = start_date.year
+            end_year = end_date.year
+            
+            deleted_count = 0
+            
+            for year in range(start_year, end_year + 1):
+                collection_name = self._get_partition_collection_name(year)
+                collection = self.db[collection_name]
+                
+                # Delete data for this symbol in this year
+                result = await collection.delete_many({
+                    "symbol": symbol,
+                    "date": {
+                        "$gte": datetime(year, 1, 1),
+                        "$lte": datetime(year, 12, 31)
+                    }
+                })
+                
+                deleted_count += result.deleted_count
+                
+            logger.info(f"🗑️ Deleted {deleted_count} existing records for {symbol}")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"Error deleting data for {symbol}: {e}")
+            return 0
+    
     async def download_historical_data_for_symbol(
         self,
         symbol: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        smart_load: bool = False
     ) -> Dict[str, Any]:
         """Download historical data for a single symbol"""
+        
+        processing_start_time = datetime.now()
         
         # Get symbol mapping
         mappings = await self.get_symbol_mappings([symbol], mapped_only=True)
@@ -360,14 +425,28 @@ class StockDataManager:
         
         logger.info(f"📈 Downloading historical data for {symbol} (scrip: {scrip_code})")
         
-        # Set default date range
+        # Handle smart_load: find earliest missing year and start from there
+        if smart_load:
+            earliest_missing_year = await self._get_earliest_missing_year(symbol)
+            smart_start_date = datetime(earliest_missing_year, 1, 1)
+            
+            if smart_start_date > start_date:
+                start_date = smart_start_date
+                logger.info(f"🎯 Smart load: Starting from earliest missing year {earliest_missing_year}")
+        
+        # Set default date range if not provided
         if not start_date:
             start_date = datetime(2005, 1, 1)
         if not end_date:
             end_date = datetime.now()
         
+        # For refresh mode: delete existing data first
+        if force_refresh:
+            logger.info(f"🔄 Refresh mode: Deleting existing data for {symbol}")
+            await self._delete_symbol_data(symbol, start_date, end_date)
+        
         # Check if we already have recent data (unless force refresh)
-        if not force_refresh:
+        elif not force_refresh:
             # For sync mode, check for gaps in the requested range
             existing_data = await self.get_price_data(
                 symbol=symbol,
@@ -423,12 +502,29 @@ class StockDataManager:
             end_date=end_date
         )
         
+        
+        processing_time = (datetime.now() - processing_start_time).total_seconds()
+        
+        # Calculate skipped records correctly
+        records_fetched = len(historical_data)
+        records_added = storage_result.get("inserted", 0)
+        records_updated = storage_result.get("updated", 0)
+        records_errors = storage_result.get("errors", 0)
+        records_skipped = records_fetched - records_added - records_updated - records_errors
+        
         return {
             "symbol": symbol,
             "scrip_code": scrip_code,
-            "records_fetched": len(historical_data),
+            "records_fetched": records_fetched,
+            "records_added": records_added,
+            "records_updated": records_updated,
+            "records_skipped": records_skipped,
+            "records_errors": records_errors,
+            "total_records": records_added + records_updated,
             "storage_result": storage_result,
-            "date_range": f"{start_date.date()} to {end_date.date()}"
+            "start_date": start_date.date().isoformat() if start_date else None,
+            "end_date": end_date.date().isoformat() if end_date else None,
+            "processing_time": f"{processing_time:.2f}s"
         }
     
     async def download_historical_data_for_index(
@@ -436,7 +532,8 @@ class StockDataManager:
         index_name: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        smart_load: bool = False
     ) -> Dict[str, Any]:
         """Download historical data for all symbols in an index"""
         
@@ -457,7 +554,8 @@ class StockDataManager:
                     symbol=mapping.symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    smart_load=smart_load
                 )
                 results.append(result)
                 
@@ -483,7 +581,8 @@ class StockDataManager:
         industry_name: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        smart_load: bool = False
     ) -> Dict[str, Any]:
         """Download historical data for all symbols in an industry"""
         
@@ -504,7 +603,8 @@ class StockDataManager:
                     symbol=mapping.symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    smart_load=smart_load
                 )
                 results.append(result)
                 
@@ -643,10 +743,12 @@ class StockDataManager:
         self,
         symbol: str,
         start_date: datetime,
-        end_date: datetime
+        end_date: datetime,
+        auto_download: bool = True
     ) -> Dict[str, Any]:
         """
         Analyze data gaps for a symbol within a date range
+        If auto_download=True, will attempt to download missing data first
         
         Returns:
             Dict containing gap analysis with missing dates, total gaps, etc.
@@ -660,40 +762,214 @@ class StockDataManager:
                 limit=None  # Get all records
             )
             
+            # Check if we have very little data and should download first
+            total_expected_business_days = self._count_business_days(start_date, end_date)
+            existing_count = len(existing_data) if existing_data else 0
+            
+            # If we have less than 10% of expected data, try to download first
+            should_download = (
+                auto_download and 
+                (existing_count == 0 or existing_count < (total_expected_business_days * 0.1))
+            )
+            
+            if should_download:
+                logger.info(f"Gap analysis for {symbol}: Only {existing_count} records exist out of {total_expected_business_days} expected. Downloading data first...")
+                
+                # Attempt to download data for this symbol
+                try:
+                    download_result = await self.download_historical_data_for_symbol(
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        force_refresh=False  # Don't refresh existing data, just fill gaps
+                    )
+                    
+                    # Get data again after download
+                    existing_data = await self.get_price_data(
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        limit=None
+                    )
+                    logger.info(f"After download attempt: {len(existing_data) if existing_data else 0} records for {symbol}")
+                    
+                    # If download shows NSE API returned no data, symbol might not trade in this period
+                    if isinstance(download_result, dict) and download_result.get("records_fetched", 0) == 0:
+                        logger.info(f"NSE returned no data for {symbol} in period {start_date.date()} to {end_date.date()} - symbol may not have been trading")
+                        # If no data was fetched from NSE, this symbol wasn't trading in this period
+                        return {
+                            "total_expected_days": 0,
+                            "total_actual_days": 0,
+                            "total_missing_days": 0,
+                            "gap_percentage": 0.0,
+                            "has_data": False,
+                            "date_range": {
+                                "start": start_date.date().isoformat(),
+                                "end": end_date.date().isoformat()
+                            },
+                            "gaps": [],
+                            "download_attempted": True,
+                            "yearly_breakdown": [],
+                            "message": f"Symbol {symbol} was not trading in the requested period {start_date.date()} to {end_date.date()}",
+                            "nse_data_available": False
+                        }
+                    
+                except Exception as download_error:
+                    logger.warning(f"Failed to download data for {symbol}: {download_error}")
+                    # Continue with gap analysis using existing data
+            
             if not existing_data:
-                # No data exists at all
-                total_business_days = self._count_business_days(start_date, end_date)
+                # No data exists at all (even after download attempt)
                 return {
-                    "total_expected_days": total_business_days,
+                    "total_expected_days": 0,
                     "total_actual_days": 0,
-                    "total_missing_days": total_business_days,
-                    "gap_percentage": 100.0,
+                    "total_missing_days": 0,
+                    "gap_percentage": 0.0,
                     "has_data": False,
                     "date_range": {
                         "start": start_date.date().isoformat(),
                         "end": end_date.date().isoformat()
                     },
-                    "gaps": [{"start": start_date.date().isoformat(), "end": end_date.date().isoformat()}]
+                    "gaps": [],
+                    "download_attempted": should_download,
+                    "yearly_breakdown": [],
+                    "message": f"No data available for {symbol} in the requested period. Symbol may not have been trading during this time.",
+                    "actual_trading_period": None
                 }
             
             # Convert to date set for easier processing
             existing_dates = {record.date.date() for record in existing_data}
             
-            # Generate all business days in the range
-            business_days = self._generate_business_days(start_date, end_date)
-            missing_dates = [day for day in business_days if day not in existing_dates]
+            # Key Fix: Determine the actual NSE trading period for this symbol
+            # We need to understand what period NSE actually has data for, not just what we have in DB
+            logger.info(f"🔍 Determining actual NSE trading period for {symbol}...")
+            
+            # Try to get a broader range of data from NSE to understand the true trading period
+            nse_data_check = await self._get_nse_trading_period(symbol, start_date, end_date)
+            
+            if nse_data_check and nse_data_check.get("has_data"):
+                # Use NSE's actual trading period
+                actual_start_date = nse_data_check["start_date"]
+                actual_end_date = nse_data_check["end_date"]
+                logger.info(f"📅 NSE trading period for {symbol}: {actual_start_date} to {actual_end_date}")
+            else:
+                # Fallback: use existing data range if NSE check fails
+                if existing_dates:
+                    actual_start_date = min(existing_dates)
+                    actual_end_date = max(existing_dates)
+                    logger.info(f"📅 Using existing data range for {symbol}: {actual_start_date} to {actual_end_date}")
+                else:
+                    # No data available anywhere
+                    return {
+                        "total_expected_days": 0,
+                        "total_actual_days": 0,
+                        "total_missing_days": 0,
+                        "gap_percentage": 0.0,
+                        "has_data": False,
+                        "date_range": {
+                            "start": start_date.date().isoformat(),
+                            "end": end_date.date().isoformat()
+                        },
+                        "gaps": [],
+                        "yearly_breakdown": [],
+                        "message": f"No NSE data available for {symbol} in any period",
+                        "actual_trading_period": None
+                    }
+            
+            # Key Fix: Only analyze the period where the symbol actually has data
+            # Don't try to analyze periods before the symbol started trading
+            analysis_start = actual_start_date
+            analysis_end = actual_end_date
+            
+            # If user requested a more recent period, respect that
+            if start_date.date() > actual_start_date:
+                analysis_start = start_date.date()
+            if end_date.date() < actual_end_date:
+                analysis_end = end_date.date()
+            
+            # If the adjusted period is invalid
+            if analysis_start > analysis_end:
+                return {
+                    "total_expected_days": 0,
+                    "total_actual_days": 0,
+                    "total_missing_days": 0,
+                    "gap_percentage": 0.0,
+                    "has_data": True,
+                    "date_range": {
+                        "start": start_date.date().isoformat(),
+                        "end": end_date.date().isoformat()
+                    },
+                    "actual_trading_period": {
+                        "start": actual_start_date.isoformat(),
+                        "end": actual_end_date.isoformat()
+                    },
+                    "gaps": [],
+                    "yearly_breakdown": [],
+                    "message": f"No overlap between requested period and actual trading period. Actual trading: {actual_start_date} to {actual_end_date}",
+                    "calendar_method": "symbol_specific"
+                }
+            
+            # Get real trading calendar only for the actual trading period
+            logger.info(f"📅 Analyzing gaps for {symbol} from {analysis_start} to {analysis_end} (actual trading period)")
+            
+            # Strategy: Use the symbol's own data pattern to identify legitimate trading days
+            # If we have substantial data coverage (>80%), trust the symbol's data pattern
+            analysis_start_dt = datetime.combine(analysis_start, datetime.min.time())
+            analysis_end_dt = datetime.combine(analysis_end, datetime.min.time())
+            
+            # Calculate business days in the ACTUAL trading period only
+            business_days_count = self._count_business_days(analysis_start_dt, analysis_end_dt)
+            existing_count = len([d for d in existing_dates if analysis_start <= d <= analysis_end])
+            coverage_ratio = existing_count / business_days_count if business_days_count > 0 else 0
+            
+            logger.info(f"📊 {symbol} has {existing_count} records out of {business_days_count} business days in actual trading period ({coverage_ratio:.2%} coverage)")
+            
+            if coverage_ratio >= 0.80:  # 80% or better coverage suggests comprehensive data
+                # Use symbol's own data pattern - these dates were definitely trading days
+                # Any missing business days in periods with good coverage are likely holidays
+                real_trading_days = sorted(list(existing_dates))
+                logger.info(f"📈 Using {symbol}'s own data pattern (high coverage: {coverage_ratio:.2%})")
+            else:
+                # Low coverage - need to supplement with other symbols to identify true trading days
+                try:
+                    real_trading_days = await self._get_real_trading_calendar(analysis_start_dt, analysis_end_dt)
+                    logger.info(f"📊 Using multi-symbol trading calendar (low coverage: {coverage_ratio:.2%})")
+                except Exception as e:
+                    logger.warning(f"Could not get trading calendar, using business days: {e}")
+                    # Fallback to business days
+                    real_trading_days = []
+                    current = analysis_start
+                    while current <= analysis_end:
+                        if current.weekday() < 5:  # Monday = 0, Friday = 4
+                            real_trading_days.append(current)
+                        current += timedelta(days=1)
+            
+            # Find missing dates based on the trading calendar approach
+            if coverage_ratio >= 0.80:
+                # High coverage: symbol's own data defines the trading calendar
+                # No gaps should be reported since we trust the data completeness
+                missing_dates = []
+                total_expected = len(real_trading_days)
+                total_actual = len(real_trading_days)  # All existing dates are valid
+                total_missing = 0
+                gap_percentage = 0.0
+                logger.info(f"✅ High coverage ({coverage_ratio:.2%}): Trusting {symbol}'s data completeness")
+            else:
+                # Low coverage: compare against trading calendar from other symbols
+                missing_dates = [day for day in real_trading_days if day not in existing_dates]
+                total_expected = len(real_trading_days)
+                total_actual = len([date for date in existing_dates if date in real_trading_days])
+                total_missing = len(missing_dates)
+                gap_percentage = (total_missing / total_expected * 100) if total_expected > 0 else 0
+                logger.info(f"⚠️ Low coverage ({coverage_ratio:.2%}): Found {total_missing} potential gaps")
             
             # Group consecutive missing dates into gaps
             gaps = self._group_consecutive_dates(missing_dates)
             
-            # Calculate statistics
-            total_expected = len(business_days)
-            total_actual = len(existing_dates)
-            total_missing = len(missing_dates)
-            gap_percentage = (total_missing / total_expected * 100) if total_expected > 0 else 0
-            
             # Yearly breakdown
-            yearly_breakdown = self._analyze_yearly_gaps(business_days, existing_dates)
+            yearly_breakdown = self._analyze_yearly_gaps(real_trading_days, existing_dates)
+            
+            logger.info(f"📊 Final gap analysis for {symbol}: {total_actual}/{total_expected} days ({gap_percentage:.2f}% gaps)")
             
             return {
                 "total_expected_days": total_expected,
@@ -705,14 +981,79 @@ class StockDataManager:
                     "start": start_date.date().isoformat(),
                     "end": end_date.date().isoformat()
                 },
+                "actual_trading_period": {
+                    "start": actual_start_date.isoformat(),
+                    "end": actual_end_date.isoformat()
+                },
+                "analysis_period": {
+                    "start": analysis_start.isoformat(),
+                    "end": analysis_end.isoformat()
+                },
                 "gaps": [{"start": gap[0].isoformat(), "end": gap[-1].isoformat(), "days": len(gap)} for gap in gaps],
-                "yearly_breakdown": yearly_breakdown
+                "yearly_breakdown": yearly_breakdown,
+                "calendar_method": "high_coverage_trust" if coverage_ratio >= 0.80 else "multi_symbol_reference",
+                "coverage_ratio": round(coverage_ratio, 4),
+                "calendar_symbols_analyzed": 1 if coverage_ratio >= 0.80 else len(await self._get_symbols_for_calendar_analysis(analysis_start_dt, analysis_end_dt)),
+                "message": f"Trusted {symbol}'s data completeness (coverage: {coverage_ratio:.2%})" if coverage_ratio >= 0.80 else f"Low coverage analysis for {symbol}"
             }
             
         except Exception as e:
             logger.error(f"Error analyzing gaps for {symbol}: {e}")
             return {"error": str(e)}
     
+    async def _get_nse_trading_period(self, symbol: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        """
+        Check NSE to determine the actual trading period for a symbol
+        This helps us understand when the symbol was actually available for trading
+        """
+        try:
+            # Get symbol mapping
+            mappings = await self.get_symbol_mappings([symbol], mapped_only=True)
+            if not mappings:
+                logger.warning(f"No NSE mapping found for {symbol}")
+                return {"has_data": False}
+            
+            mapping = mappings[0]
+            scrip_code = mapping.nse_scrip_code
+            
+            # Try to fetch a small sample of data to check availability
+            # Start with the requested period, but extend if needed
+            test_start = start_date
+            test_end = end_date
+            
+            logger.info(f"🔍 Checking NSE data availability for {symbol} (scrip: {scrip_code})")
+            
+            # Try to fetch data for the requested period
+            historical_data = await self.nse_client.fetch_historical_data(
+                scrip_code=scrip_code,
+                symbol=symbol,
+                start_date=test_start,
+                end_date=test_end
+            )
+            
+            if not historical_data:
+                # No data in requested period, symbol might not be trading in this period
+                logger.info(f"No NSE data found for {symbol} in period {test_start.date()} to {test_end.date()}")
+                return {"has_data": False}
+            
+            # Found data - determine the actual range
+            nse_dates = [record.date.date() for record in historical_data]
+            nse_start = min(nse_dates)
+            nse_end = max(nse_dates)
+            
+            logger.info(f"📊 NSE has data for {symbol} from {nse_start} to {nse_end} ({len(historical_data)} records)")
+            
+            return {
+                "has_data": True,
+                "start_date": nse_start,
+                "end_date": nse_end,
+                "sample_records": len(historical_data)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking NSE trading period for {symbol}: {e}")
+            return {"has_data": False}
+
     def _count_business_days(self, start_date: datetime, end_date: datetime) -> int:
         """Count business days between two dates"""
         from datetime import timedelta
@@ -725,14 +1066,175 @@ class StockDataManager:
             current += timedelta(days=1)
         return count
     
+    async def _get_supplementary_trading_calendar(
+        self, 
+        start_date: datetime, 
+        end_date: datetime, 
+        primary_symbol: str,
+        primary_symbol_dates: set
+    ) -> List[datetime.date]:
+        """
+        Get supplementary trading calendar from other symbols to enhance gap detection.
+        Only includes dates that are business days and reasonable for the primary symbol.
+        
+        Args:
+            start_date: Start date for calendar extraction
+            end_date: End date for calendar extraction
+            primary_symbol: The symbol we're analyzing
+            primary_symbol_dates: Set of dates where primary symbol has data
+            
+        Returns:
+            List of additional trading dates based on other symbols
+        """
+        try:
+            # Get a few reliable symbols for calendar reference
+            symbols_for_analysis = await self._get_symbols_for_calendar_analysis(start_date, end_date)
+            
+            if len(symbols_for_analysis) < 2:
+                logger.warning("Insufficient symbols for supplementary calendar")
+                return []
+            
+            # Use top 3 symbols (excluding primary symbol) for supplementary calendar
+            reference_symbols = [s for s in symbols_for_analysis[:5] if s != primary_symbol][:3]
+            
+            if not reference_symbols:
+                return []
+            
+            # Collect dates from reference symbols
+            supplementary_dates = set()
+            
+            for symbol in reference_symbols:
+                try:
+                    symbol_data = await self.get_price_data(
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        limit=None
+                    )
+                    
+                    for record in symbol_data:
+                        trading_date = record.date.date()
+                        # Only include business days that fall within a reasonable range
+                        if (trading_date.weekday() < 5 and 
+                            start_date.date() <= trading_date <= end_date.date()):
+                            supplementary_dates.add(trading_date)
+                            
+                except Exception as e:
+                    logger.warning(f"Could not analyze {symbol} for supplementary calendar: {e}")
+                    continue
+            
+            # Return only dates that are not already in primary symbol's data
+            # These represent potential missing trading days
+            additional_dates = [date for date in supplementary_dates if date not in primary_symbol_dates]
+            
+            logger.info(f"📊 Supplementary calendar: found {len(additional_dates)} additional potential trading days")
+            
+            return sorted(additional_dates)
+            
+        except Exception as e:
+            logger.error(f"Error getting supplementary trading calendar: {e}")
+            return []
+
+    async def _get_real_trading_calendar(self, start_date: datetime, end_date: datetime, min_symbols: int = 5) -> List[datetime.date]:
+        """
+        Extract real trading calendar by analyzing actual trading data from multiple symbols.
+        This is more accurate than guessing holidays.
+        
+        Args:
+            start_date: Start date for calendar extraction
+            end_date: End date for calendar extraction  
+            min_symbols: Minimum number of symbols that must have data for a date to be considered a trading day
+            
+        Returns:
+            List of actual trading dates based on real market data
+        """
+        try:
+            logger.info(f"📅 Extracting real trading calendar from {start_date.date()} to {end_date.date()}")
+            
+            # Get symbols with good data coverage for analysis
+            symbols_for_analysis = await self._get_symbols_for_calendar_analysis(start_date, end_date)
+            
+            if len(symbols_for_analysis) < min_symbols:
+                logger.warning(f"Only {len(symbols_for_analysis)} symbols available for calendar analysis, using basic weekday calendar")
+                return self._generate_business_days(start_date, end_date)
+            
+            # Count trading dates across all symbols
+            date_counts = {}
+            
+            for symbol in symbols_for_analysis[:10]:  # Analyze top 10 symbols to avoid overload
+                try:
+                    symbol_data = await self.get_price_data(
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        limit=None
+                    )
+                    
+                    for record in symbol_data:
+                        trading_date = record.date.date()
+                        date_counts[trading_date] = date_counts.get(trading_date, 0) + 1
+                        
+                except Exception as e:
+                    logger.warning(f"Could not analyze {symbol} for calendar: {e}")
+                    continue
+            
+            # Filter dates that appear in at least min_symbols
+            real_trading_dates = [
+                date for date, count in date_counts.items() 
+                if count >= min(min_symbols, len(symbols_for_analysis))
+            ]
+            
+            real_trading_dates.sort()
+            
+            logger.info(f"📊 Extracted {len(real_trading_dates)} real trading dates from {len(symbols_for_analysis)} symbols")
+            
+            return real_trading_dates
+            
+        except Exception as e:
+            logger.error(f"Error extracting real trading calendar: {e}")
+            # Fallback to basic weekday calendar
+            return self._generate_business_days(start_date, end_date)
+    
+    async def _get_symbols_for_calendar_analysis(self, start_date: datetime, end_date: datetime) -> List[str]:
+        """Get symbols with good data coverage for trading calendar analysis"""
+        try:
+            # Use the data statistics to get actual symbols in our database
+            stats = await self.get_data_statistics()
+            available_symbols = stats.get('symbols_with_data', [])
+            
+            if not available_symbols:
+                logger.error("No symbols found in database statistics - cannot perform data-driven calendar analysis")
+                return []
+            
+            logger.info(f"Using {len(available_symbols)} actual symbols from database for calendar analysis")
+            
+            # Return up to 20 symbols for calendar analysis (enough for good accuracy)
+            return available_symbols[:20]
+            
+        except Exception as e:
+            logger.error(f"Error getting actual symbols from database: {e}")
+            return []
+            
+            logger.info(f"Found {len(symbols_with_data)} symbols for trading calendar analysis")
+            return symbols_with_data
+            
+        except Exception as e:
+            logger.error(f"Error getting symbols for calendar analysis: {e}")
+            return []
+
     def _generate_business_days(self, start_date: datetime, end_date: datetime) -> List[datetime.date]:
-        """Generate list of business days between two dates"""
+        """Generate list of business days between two dates (weekdays only)
+        
+        Note: This only excludes weekends. For accurate gap analysis, 
+        Indian stock market holidays should be provided via configuration.
+        """
         from datetime import timedelta
         business_days = []
         current = start_date.date()
         end = end_date.date()
+        
         while current <= end:
-            if current.weekday() < 5:  # Monday = 0, Friday = 4
+            if current.weekday() < 5:  # Monday = 0, Friday = 4 (exclude weekends only)
                 business_days.append(current)
             current += timedelta(days=1)
         return business_days
