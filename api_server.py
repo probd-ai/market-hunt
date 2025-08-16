@@ -4,7 +4,7 @@ FastAPI Backend Server for Market Hunt Frontend
 Provides RESTful API endpoints for the Next.js frontend
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
@@ -758,12 +758,13 @@ class StockDataResponse(BaseModel):
 async def get_symbol_mappings(
     index_name: Optional[str] = None,
     industry: Optional[str] = None,
+    symbol_search: Optional[str] = None,
     mapped_only: bool = False,
-    include_up_to_date: bool = False,
-    limit: Optional[int] = None,
-    offset: Optional[int] = None
+    include_up_to_date: bool = Query(False, description="Include up-to-date status (slower)"),
+    limit: Optional[int] = Query(50, description="Number of mappings to return"),
+    offset: Optional[int] = Query(0, description="Number of mappings to skip")
 ):
-    """Get symbol mappings between index_meta and NSE scripcode"""
+    """Get symbol mappings with optimized up-to-date status from database"""
     try:
         if mongo_conn.db is None:
             raise HTTPException(status_code=500, detail="Database connection not available")
@@ -771,71 +772,71 @@ async def get_symbol_mappings(
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            mappings = await manager.get_symbol_mappings(
+            # Get all mappings efficiently
+            all_mappings = await manager.get_symbol_mappings(
                 index_name=index_name,
                 industry=industry,
+                symbol_search=symbol_search,
                 mapped_only=mapped_only
             )
             
-            # Apply pagination if specified
-            total_mappings = len(mappings)
-            if offset is not None:
-                mappings = mappings[offset:]
-            if limit is not None:
-                mappings = mappings[:limit]
+            # Apply pagination manually
+            start_idx = offset or 0
+            end_idx = start_idx + (limit or 50)
+            mappings = all_mappings[start_idx:end_idx]
+            total_mappings = len(all_mappings)
             
             # Convert to dict for JSON serialization
             mappings_data = []
             for mapping in mappings:
-                # Only calculate up-to-date status if requested (performance optimization)
-                is_up_to_date = None
+                # For fast path, get existing status from DB (might be None)
+                is_up_to_date = getattr(mapping, 'is_up_to_date', None)
+                data_quality_score = getattr(mapping, 'data_quality_score', None)
+                last_status_check = getattr(mapping, 'last_status_check', None)
+                last_data_update = getattr(mapping, 'last_data_update', None)
                 
-                if include_up_to_date:
+                # Only calculate status if explicitly requested and not available
+                if include_up_to_date and is_up_to_date is None and mapping.nse_scrip_code:
                     try:
-                        if mapping.symbol and mapping.nse_scrip_code:
-                            # Use complete historical gap analysis to determine if symbol is up-to-date
-                            # Check for gaps in the last 60 days from today
-                            from datetime import datetime, timedelta
-                            end_date = datetime.now()
-                            start_date = end_date - timedelta(days=60)
+                        # Calculate status on demand (slower path)
+                        await manager.update_symbol_status(mapping.symbol, force_update=True)
+                        # Get updated values
+                        updated_mapping = await manager._get_symbol_mapping_by_symbol(mapping.symbol)
+                        if updated_mapping:
+                            is_up_to_date = updated_mapping.is_up_to_date
+                            data_quality_score = updated_mapping.data_quality_score
+                            last_status_check = updated_mapping.last_status_check
+                            last_data_update = updated_mapping.last_data_update
                             
-                            gap_analysis = await manager.analyze_data_gaps(
-                                symbol=mapping.symbol,
-                                start_date=start_date,
-                                end_date=end_date,
-                                auto_download=False  # Don't auto-download, just analyze
-                            )
-                            
-                            # Consider up-to-date if gap percentage is less than 20% in recent period
-                            # and we have some actual data
-                            gap_percentage = gap_analysis.get('gap_percentage', 100)
-                            has_data = gap_analysis.get('has_data', False)
-                            total_actual_days = gap_analysis.get('total_actual_days', 0)
-                            
-                            is_up_to_date = has_data and gap_percentage < 20 and total_actual_days > 0
-                            
-                    except Exception as gap_error:
-                        logger.warning(f"Could not determine up-to-date status for {mapping.symbol}: {gap_error}")
+                    except Exception as e:
+                        logger.warning(f"Could not calculate status for {mapping.symbol}: {e}")
                         is_up_to_date = False
+                        data_quality_score = 0
                 
                 mapping_dict = {
                     "symbol": mapping.symbol,
                     "company_name": mapping.company_name,
                     "industry": mapping.industry,
-                    "index_names": mapping.index_names,  # Now an array
+                    "index_names": mapping.index_names,
                     "nse_scrip_code": mapping.nse_scrip_code,
                     "nse_symbol": mapping.nse_symbol,
                     "nse_name": mapping.nse_name,
                     "match_confidence": mapping.match_confidence,
                     "last_updated": mapping.last_updated.isoformat() if mapping.last_updated else None,
-                    "is_up_to_date": is_up_to_date
+                    "is_up_to_date": is_up_to_date,
+                    "data_quality_score": data_quality_score,
+                    "last_status_check": last_status_check.isoformat() if last_status_check else None,
+                    "last_data_update": last_data_update.isoformat() if last_data_update else None
                 }
                 mappings_data.append(mapping_dict)
+            
+            # Calculate correct mapped count from all symbols, not just returned subset
+            total_mapped_count = len([m for m in all_mappings if getattr(m, 'nse_scrip_code', None) is not None])
             
             return JSONResponse(content={
                 "total_mappings": total_mappings,
                 "returned_count": len(mappings_data),
-                "mapped_count": len([m for m in mappings_data if m["nse_scrip_code"] is not None]),
+                "mapped_count": total_mapped_count,
                 "offset": offset or 0,
                 "limit": limit,
                 "mappings": mappings_data
@@ -847,7 +848,10 @@ async def get_symbol_mappings(
 
 @app.post("/api/stock/mappings/refresh")
 async def refresh_symbol_mappings():
-    """Refresh symbol mappings from index_meta and NSE masters"""
+    """
+    Refresh symbol mappings from index_meta and NSE masters, 
+    then update status information with force=true
+    """
     try:
         if mongo_conn.db is None:
             raise HTTPException(status_code=500, detail="Database connection not available")
@@ -855,12 +859,30 @@ async def refresh_symbol_mappings():
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            result = await manager.refresh_symbol_mappings_from_index_meta()
+            # Step 1: Refresh symbol mappings (preserves existing status fields)
+            logger.info("🔄 Step 1: Refreshing symbol mappings from index data...")
+            mapping_result = await manager.refresh_symbol_mappings_from_index_meta()
+            
+            # Step 2: Update all symbol status with force=true
+            logger.info("🔄 Step 2: Updating symbol status information...")
+            status_result = await manager.batch_update_symbol_status(
+                symbols=None,  # Update all symbols
+                force_update=True  # Force update regardless of last check time
+            )
+            
+            successful_mappings = mapping_result.get("updated", 0) + mapping_result.get("inserted", 0)
+            successful_status = sum(1 for success in status_result.values() if success)
+            total_symbols = len(status_result)
             
             return JSONResponse(content={
                 "success": True,
-                "message": "Symbol mappings refreshed successfully",
-                "result": result
+                "message": f"Refreshed {successful_mappings} mappings and updated status for {successful_status}/{total_symbols} symbols",
+                "mapping_result": mapping_result,
+                "status_result": {
+                    "total_symbols": total_symbols,
+                    "successful_updates": successful_status,
+                    "failed_updates": total_symbols - successful_status
+                }
             })
             
     except Exception as e:
@@ -936,9 +958,45 @@ async def fix_duplicate_nse_codes():
 @app.post("/api/stock/mappings/update-status")
 async def update_up_to_date_status(
     symbols: Optional[List[str]] = None,
-    batch_size: int = 10
+    force_update: bool = False
 ):
-    """Update up-to-date status for symbols in batches (performance optimized)"""
+    """Update up-to-date status for symbols using optimized database storage"""
+    try:
+        if mongo_conn.db is None:
+            raise HTTPException(status_code=500, detail="Database connection not available")
+        
+        from stock_data_manager import StockDataManager
+        
+        async with StockDataManager() as manager:
+            # Use new batch update method
+            results = await manager.batch_update_symbol_status(
+                symbols=symbols,
+                force_update=force_update
+            )
+            
+            successful = sum(1 for success in results.values() if success)
+            total = len(results)
+            
+            return JSONResponse(content={
+                "success": True,
+                "message": f"Updated status for {successful}/{total} symbols",
+                "updated_count": successful,
+                "failed_count": total - successful,
+                "details": results
+            })
+            
+    except Exception as e:
+        logger.error(f"Error updating symbol status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update symbol status: {str(e)}")
+
+@app.post("/api/stock/data/load/{symbol}")
+async def load_symbol_data(
+    symbol: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sync_mode: str = "load"
+):
+    """Load/refresh data for a specific symbol and update its status"""
     try:
         if mongo_conn.db is None:
             raise HTTPException(status_code=500, detail="Database connection not available")
@@ -947,70 +1005,49 @@ async def update_up_to_date_status(
         from datetime import datetime, timedelta
         
         async with StockDataManager() as manager:
-            # Get symbols to update
-            if symbols is None:
-                # Get all symbols if none specified
-                mappings = await manager.get_symbol_mappings(mapped_only=True)
-                symbols = [m.symbol for m in mappings if m.symbol and m.nse_scrip_code]
-            
-            updated_count = 0
-            failed_count = 0
-            
-            # Process in batches for better performance
-            for i in range(0, len(symbols), batch_size):
-                batch = symbols[i:i + batch_size]
+            # Parse dates
+            if start_date:
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(tzinfo=None)
+            else:
+                start_dt = datetime.now() - timedelta(days=365)  # Default to 1 year
                 
-                for symbol in batch:
-                    try:
-                        # Quick gap analysis for recent data only
-                        end_date = datetime.now()
-                        start_date = end_date - timedelta(days=30)  # Shorter window for faster processing
-                        
-                        gap_analysis = await manager.analyze_data_gaps(
-                            symbol=symbol,
-                            start_date=start_date,
-                            end_date=end_date,
-                            auto_download=False
-                        )
-                        
-                        # Determine up-to-date status
-                        gap_percentage = gap_analysis.get('gap_percentage', 100)
-                        has_data = gap_analysis.get('has_data', False)
-                        total_actual_days = gap_analysis.get('total_actual_days', 0)
-                        
-                        is_up_to_date = has_data and gap_percentage < 30 and total_actual_days > 0  # More lenient for faster processing
-                        
-                        # Update in database
-                        collection = mongo_conn.db.symbol_mappings
-                        await collection.update_one(
-                            {"symbol": symbol},
-                            {"$set": {"is_up_to_date": is_up_to_date, "status_updated_at": datetime.now()}}
-                        )
-                        
-                        updated_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to update status for {symbol}: {e}")
-                        failed_count += 1
+            if end_date:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(tzinfo=None)
+            else:
+                end_dt = datetime.now()
+            
+            # Download data based on sync mode
+            if sync_mode == "refresh":
+                # Delete existing data first for the date range
+                await manager._delete_symbol_data(symbol, start_dt, end_dt)
+            
+            # Download the data
+            result = await manager.download_historical_data_for_symbol(
+                symbol=symbol,
+                start_date=start_dt,
+                end_date=end_dt
+            )
+            
+            # Update the symbol's up-to-date status
+            await manager.update_symbol_status(symbol, force_update=True)
             
             return JSONResponse(content={
                 "success": True,
-                "message": f"Updated {updated_count} symbols, {failed_count} failed",
-                "updated_count": updated_count,
-                "failed_count": failed_count,
-                "total_processed": len(symbols)
+                "message": f"Data loaded for {symbol}",
+                "result": result,
+                "sync_mode": sync_mode
             })
             
     except Exception as e:
-        logger.error(f"Error updating up-to-date status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+        logger.error(f"Error loading data for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load data for {symbol}: {str(e)}")
 
 @app.get("/api/stock/data/{symbol}")
 async def get_stock_price_data(
     symbol: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: Optional[int] = 100
+    limit: Optional[int] = 5000  # Increased for 5 years of data (~250 trading days per year)
 ):
     """Get historical price data for a symbol"""
     try:
@@ -1066,6 +1103,7 @@ class GapAnalysisRequest(BaseModel):
     start_date: str  # ISO format: YYYY-MM-DD
     end_date: str    # ISO format: YYYY-MM-DD
     auto_download: bool = True  # Whether to download missing data first
+    full_historical_analysis: bool = False  # Whether to discover and analyze complete NSE trading range
 
 @app.post("/api/stock/gaps")
 async def analyze_data_gaps(request: GapAnalysisRequest):
@@ -1091,7 +1129,8 @@ async def analyze_data_gaps(request: GapAnalysisRequest):
                     symbol=request.symbol,
                     start_date=start_dt,
                     end_date=end_dt,
-                    auto_download=request.auto_download
+                    auto_download=request.auto_download,
+                    full_historical_analysis=request.full_historical_analysis
                 )
                 return JSONResponse(content={
                     "symbol": request.symbol,
@@ -1114,7 +1153,8 @@ async def analyze_data_gaps(request: GapAnalysisRequest):
                         symbol=symbol,
                         start_date=start_dt,
                         end_date=end_dt,
-                        auto_download=request.auto_download
+                        auto_download=request.auto_download,
+                        full_historical_analysis=request.full_historical_analysis
                     )
                     all_gaps[symbol] = gaps
                 
@@ -1140,7 +1180,8 @@ async def analyze_data_gaps(request: GapAnalysisRequest):
                         symbol=symbol,
                         start_date=start_dt,
                         end_date=end_dt,
-                        auto_download=request.auto_download
+                        auto_download=request.auto_download,
+                        full_historical_analysis=request.full_historical_analysis
                     )
                     all_gaps[symbol] = gaps
                 
@@ -1408,6 +1449,15 @@ async def download_symbol_data_task(process_id: str, symbol: str, start_date: da
                     detail["status"] = "success"
                     summary["successful_symbols"] += 1
                 
+                # Update symbol status after successful download
+                if detail["status"] == "success":
+                    try:
+                        await manager.update_symbol_data_timestamp(symbol)
+                        await manager.update_symbol_status(symbol, force_update=True)
+                        logger.info(f"✅ Updated status for symbol {symbol}")
+                    except Exception as status_error:
+                        logger.warning(f"Failed to update status for {symbol}: {status_error}")
+                
                 logger.info(f"✅ Background download completed for symbol {symbol}: {result}")
                 
             except Exception as e:
@@ -1525,6 +1575,14 @@ async def download_symbols_data_task(process_id: str, symbols: List[str], start_
                     else:
                         detail["status"] = "success"
                         summary["successful_symbols"] += 1
+                    
+                    # Update symbol status after successful download
+                    if detail["status"] == "success":
+                        try:
+                            await manager.update_symbol_data_timestamp(symbol)
+                            await manager.update_symbol_status(symbol, force_update=True)
+                        except Exception as status_error:
+                            logger.warning(f"Failed to update status for {symbol}: {status_error}")
                     
                     completed_count += 1
                     logger.info(f"✅ Downloaded data for symbol {symbol}: {result}")

@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { ProcessEntry, TaskProgress, SchedulerData } from '@/types';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { 
   ClockIcon, 
   PlayIcon,
@@ -154,12 +155,13 @@ export default function SchedulerPage() {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Stock Data Scheduler</h1>
-          <p className="text-gray-600 mt-2">Monitor and manage stock data processing tasks</p>
-        </div>
+    <DashboardLayout>
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Process Scheduler</h1>
+            <p className="text-gray-600 mt-2">Monitor and manage price data processing tasks</p>
+          </div>
         <div className="flex items-center space-x-4">
           <Button
             onClick={() => setAutoRefresh(!autoRefresh)}
@@ -529,5 +531,6 @@ export default function SchedulerPage() {
         </div>
       )}
     </div>
+    </DashboardLayout>
   );
 }

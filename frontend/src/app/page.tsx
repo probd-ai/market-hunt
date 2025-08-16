@@ -34,7 +34,7 @@ export default function DashboardPage() {
 
   const { data: stockStats } = useQuery({
     queryKey: ['stockStatistics'],
-    queryFn: () => apiClient.getStockStatistics(),
+    queryFn: () => apiClient.getStockDataStatistics(),
   });
 
   const refreshDataMutation = useMutation({

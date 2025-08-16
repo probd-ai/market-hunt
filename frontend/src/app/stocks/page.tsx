@@ -2,18 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { SymbolMapping, SymbolMappingResponse, StockDataStatistics, DownloadStockDataRequest, ProgressUpdate, HistoricalProcessing, DataGapInfo } from '@/types';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { StockChart } from '@/components/stocks/StockChart';
 import { SymbolSearch } from '@/components/stocks/SymbolSearch';
+import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { 
   CurrencyDollarIcon, 
   CloudArrowDownIcon, 
   ClockIcon, 
-  ChartBarIcon,
   TrashIcon,
   ArrowPathIcon,
   CheckCircleIcon,
@@ -22,15 +22,15 @@ import {
 } from '@heroicons/react/24/outline';
 
 type LoadMode = 'symbol' | 'index' | 'industry';
-type SyncMode = 'load' | 'refresh' | 'delete';
+type SyncMode = 'load' | 'sync' | 'refresh' | 'delete';
 
 export default function StocksPage() {
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('');
   const [downloadSymbol, setDownloadSymbol] = useState<string>('');
   const [startDate, setStartDate] = useState<string>('2020-01-01'); // Default to 2020 for realistic gap analysis
   const [endDate, setEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [selectedIndex, setSelectedIndex] = useState<string>('');
   const [selectedIndustry, setSelectedIndustry] = useState<string>('');
+  const [symbolFilter, setSymbolFilter] = useState<string>(''); // New filter for symbol search
   const [mappedOnly, setMappedOnly] = useState<boolean>(true);
   const [loadMode, setLoadMode] = useState<LoadMode>('symbol');
   const [syncMode, setSyncMode] = useState<SyncMode>('load');
@@ -43,29 +43,31 @@ export default function StocksPage() {
 
   // Fetch symbol mappings
   const { data: symbolMappingsResponse, isLoading: mappingsLoading, error: mappingsError } = useQuery({
-    queryKey: ['symbolMappings', { index_name: selectedIndex, mapped_only: mappedOnly }],
+    queryKey: ['symbolMappings', { 
+      index_name: selectedIndex, 
+      industry: selectedIndustry,
+      symbol_filter: symbolFilter,
+      mapped_only: mappedOnly 
+    }],
     queryFn: () => api.getSymbolMappings({ 
       index_name: selectedIndex || undefined, 
-      mapped_only: mappedOnly 
+      industry: selectedIndustry || undefined,
+      symbol_search: symbolFilter || undefined,
+      mapped_only: mappedOnly,
+      limit: symbolFilter ? 50 : 200  // Show more results when not searching
     }),
   });
 
   const symbolMappings = symbolMappingsResponse?.mappings || [];
+
+  // No client-side filtering needed - all filtering is done server-side
+  const filteredSymbolMappings = symbolMappings;
 
   // Fetch stock statistics
   const { data: statistics, isLoading: statsLoading } = useQuery({
     queryKey: ['stockStatistics'],
     queryFn: () => api.getStockDataStatistics(),
   });
-
-  // Fetch stock price data
-  const { data: priceDataResponse, isLoading: priceLoading } = useQuery({
-    queryKey: ['stockData', selectedSymbol, startDate, endDate],
-    queryFn: () => api.getStockData(selectedSymbol, startDate, endDate),
-    enabled: !!selectedSymbol,
-  });
-
-  const priceData = priceDataResponse?.data || [];
 
   // Fetch progress updates for active task
   const { data: progressData } = useQuery({
@@ -78,8 +80,45 @@ export default function StocksPage() {
   // Refresh symbol mappings mutation
   const refreshMappingsMutation = useMutation({
     mutationFn: () => api.refreshSymbolMappings(),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      // Show success message
+      const message = response.message || 'Mappings refreshed successfully';
+      const totalMappings = response.total_mappings || 0;
+      alert(`✅ Refresh Complete!\n📝 Mappings: ${totalMappings} symbols processed\n${message}`);
+    },
+    onError: (error: any) => {
+      console.error('Refresh mappings error:', error);
+      alert(`Failed to refresh mappings: ${error.message || 'Unknown error'}`);
+    },
+  });
+
+  // Refresh status mutation
+  const refreshStatusMutation = useMutation({
+    mutationFn: () => api.updateSymbolStatus(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      alert('Symbol status updated successfully!');
+    },
+    onError: (error: any) => {
+      console.error('Refresh status error:', error);
+      alert(`Failed to update status: ${error.message || 'Unknown error'}`);
+    },
+  });
+
+  // Load data for specific symbol mutation
+  const loadSymbolDataMutation = useMutation({
+    mutationFn: ({ symbol, syncMode }: { symbol: string; syncMode: 'load' | 'refresh' }) => 
+      api.loadSymbolData(symbol, syncMode),
+    onSuccess: (response, variables) => {
+      // Refresh the mappings to show updated status
+      queryClient.invalidateQueries({ queryKey: ['symbolMappings'] });
+      // Show success message
+      alert(`Data ${variables.syncMode === 'load' ? 'loaded' : 'refreshed'} successfully for ${variables.symbol}!`);
+    },
+    onError: (error: any) => {
+      console.error('Load data error:', error);
+      alert(`Failed to load data: ${error.message || 'Unknown error'}`);
     },
   });
 
@@ -123,7 +162,7 @@ export default function StocksPage() {
   const uniqueIndices = Array.from(
     new Set((symbolMappings || []).flatMap(mapping => mapping.index_names || []))
   ).sort();
-
+  
   const uniqueIndustries = Array.from(
     new Set((symbolMappings || []).map(mapping => mapping.industry))
   ).filter(Boolean).sort();
@@ -132,6 +171,7 @@ export default function StocksPage() {
     const request: any = {
       start_date: startDate,
       end_date: endDate,
+      full_check: true  // Enable complete historical analysis with NSE discovery
     };
 
     if (loadMode === 'symbol' && downloadSymbol) {
@@ -242,11 +282,12 @@ export default function StocksPage() {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold">Stock Data Management</h1>
+    <DashboardLayout>
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold">Price Data Management</h1>
           <p className="text-gray-600 mt-2">
             Load stock data by symbol, index, or industry with intelligent synchronization
           </p>
@@ -772,32 +813,145 @@ export default function StocksPage() {
 
       {/* Symbol Mappings Section */}
       <Card className="p-6">
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-semibold">Symbol Mappings</h2>
-          <div className="flex gap-4">
+          <div className="flex gap-2">
+            <Button
+              onClick={() => refreshStatusMutation.mutate()}
+              disabled={refreshStatusMutation.isPending}
+              size="sm"
+              variant="outline"
+            >
+              {refreshStatusMutation.isPending ? 'Updating...' : 'Refresh Status'}
+            </Button>
+            <Button
+              onClick={() => refreshMappingsMutation.mutate()}
+              disabled={refreshMappingsMutation.isPending}
+              size="sm"
+              variant="outline"
+            >
+              {refreshMappingsMutation.isPending ? 'Refreshing...' : 'Refresh Mappings'}
+            </Button>
+          </div>
+        </div>
+
+        {/* Enhanced Filter Section */}
+        <div className="bg-gray-50 p-4 rounded-lg mb-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Symbol Search Filter */}
             <div>
-              <label className="block text-sm font-medium mb-1">Filter by Index</label>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                🔍 Search Symbol/Company
+              </label>
+              <input
+                type="text"
+                placeholder="Type symbol or company name..."
+                value={symbolFilter}
+                onChange={(e) => setSymbolFilter(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              {symbolFilter && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Showing symbols matching "{symbolFilter}"
+                </div>
+              )}
+            </div>
+
+            {/* Index Filter */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                📊 Filter by Index
+              </label>
               <select
                 value={selectedIndex}
                 onChange={(e) => setSelectedIndex(e.target.value)}
-                className="border rounded px-3 py-2 text-sm"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 <option value="">All Indices</option>
                 {uniqueIndices.map(index => (
                   <option key={index} value={index}>{index}</option>
                 ))}
               </select>
+              {selectedIndex && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Filtered by {selectedIndex}
+                </div>
+              )}
             </div>
-            <div className="flex items-end">
-              <label className="flex items-center text-sm">
-                <input
-                  type="checkbox"
-                  checked={mappedOnly}
-                  onChange={(e) => setMappedOnly(e.target.checked)}
-                  className="mr-2"
-                />
-                Mapped only
+
+            {/* Industry Filter */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                🏭 Filter by Industry
               </label>
+              <select
+                value={selectedIndustry}
+                onChange={(e) => setSelectedIndustry(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">All Industries</option>
+                {uniqueIndustries.map(industry => (
+                  <option key={industry} value={industry}>{industry}</option>
+                ))}
+              </select>
+              {selectedIndustry && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Filtered by {selectedIndustry}
+                </div>
+              )}
+            </div>
+
+            {/* Options & Clear Filters */}
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-700">
+                ⚙️ Options
+              </label>
+              <div className="space-y-2">
+                <label className="flex items-center text-sm">
+                  <input
+                    type="checkbox"
+                    checked={mappedOnly}
+                    onChange={(e) => setMappedOnly(e.target.checked)}
+                    className="mr-2"
+                  />
+                  Mapped symbols only
+                </label>
+                <Button
+                  onClick={() => {
+                    setSymbolFilter('');
+                    setSelectedIndex('');
+                    setSelectedIndustry('');
+                    setMappedOnly(true);
+                  }}
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs p-1 h-auto"
+                >
+                  🧹 Clear all filters
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Summary */}
+          <div className="mt-4 pt-3 border-t border-gray-200">
+            <div className="flex justify-between items-center text-sm">
+              <div className="text-gray-600">
+                Showing {filteredSymbolMappings.length} of {symbolMappingsResponse?.total_mappings || 0} symbols
+                {(symbolFilter || selectedIndex || selectedIndustry) && (
+                  <span className="ml-2 text-blue-600">
+                    (filtered: {[
+                      symbolFilter && `symbol: "${symbolFilter}"`,
+                      selectedIndex && `index: "${selectedIndex}"`,
+                      selectedIndustry && `industry: "${selectedIndustry}"`
+                    ].filter(Boolean).join(', ')})
+                  </span>
+                )}
+              </div>
+              <div className="text-gray-500">
+                Mapped: {symbolMappingsResponse?.mapped_count || 0} | 
+                Total: {symbolMappingsResponse?.total_mappings || 0}
+              </div>
             </div>
           </div>
         </div>
@@ -820,12 +974,13 @@ export default function StocksPage() {
                   <th className="border border-gray-300 px-4 py-2 text-left">Industry</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">Indices</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">NSE Code</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left">Up-to-Date</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Data Status</th>
+                  <th className="border border-gray-300 px-4 py-2 text-left">Quality</th>
                   <th className="border border-gray-300 px-4 py-2 text-left">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {(symbolMappings || []).map((mapping, index) => (
+                {(filteredSymbolMappings || []).map((mapping, index) => (
                   <tr key={`${mapping.symbol}-${index}`} className="hover:bg-gray-50">
                     <td className="border border-gray-300 px-4 py-2 font-medium">
                       {mapping.symbol}
@@ -859,17 +1014,62 @@ export default function StocksPage() {
                             ? 'bg-red-100 text-red-800' 
                             : 'bg-gray-100 text-gray-800'
                       }`}>
-                        {mapping.is_up_to_date === true ? '✓ Yes' : mapping.is_up_to_date === false ? '✗ No' : 'Unknown'}
+                        {mapping.is_up_to_date === true ? '✓ Up-to-date' : mapping.is_up_to_date === false ? '✗ Outdated' : 'Unknown'}
                       </span>
                     </td>
                     <td className="border border-gray-300 px-4 py-2">
-                      <Button
-                        onClick={() => setSelectedSymbol(mapping.symbol)}
-                        size="sm"
-                        variant="outline"
-                      >
-                        View Data
-                      </Button>
+                      {mapping.data_quality_score !== null && mapping.data_quality_score !== undefined ? (
+                        <div className="flex items-center space-x-2">
+                          <div className={`w-12 h-2 rounded-full overflow-hidden ${
+                            mapping.data_quality_score >= 80 ? 'bg-green-200' : 
+                            mapping.data_quality_score >= 60 ? 'bg-yellow-200' : 'bg-red-200'
+                          }`}>
+                            <div 
+                              className={`h-full ${
+                                mapping.data_quality_score >= 80 ? 'bg-green-500' : 
+                                mapping.data_quality_score >= 60 ? 'bg-yellow-500' : 'bg-red-500'
+                              }`}
+                              style={{ width: `${mapping.data_quality_score}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-gray-600">
+                            {Math.round(mapping.data_quality_score)}%
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400">-</span>
+                      )}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2">
+                      <div className="flex space-x-1">
+                        <Button
+                          onClick={() => loadSymbolDataMutation.mutate({ symbol: mapping.symbol, syncMode: 'load' })}
+                          size="sm"
+                          variant="outline"
+                          disabled={loadSymbolDataMutation.isPending || !mapping.nse_scrip_code}
+                          className="text-xs px-2 py-1"
+                        >
+                          {loadSymbolDataMutation.isPending ? 'Loading...' : 'Load'}
+                        </Button>
+                        <Button
+                          onClick={() => loadSymbolDataMutation.mutate({ symbol: mapping.symbol, syncMode: 'refresh' })}
+                          size="sm"
+                          variant="outline"
+                          disabled={loadSymbolDataMutation.isPending || !mapping.nse_scrip_code}
+                          className="text-xs px-2 py-1"
+                        >
+                          Refresh
+                        </Button>
+                        <Link href={`/charts?symbol=${mapping.symbol}`}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-xs px-2 py-1 text-blue-600 hover:text-blue-800"
+                          >
+                            Chart
+                          </Button>
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -878,152 +1078,7 @@ export default function StocksPage() {
           </div>
         )}
       </Card>
-
-      {/* Stock Price Data Section */}
-      {selectedSymbol && (
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div className="xl:col-span-2">
-            <Card className="p-6">
-              <StockChart data={priceData} symbol={selectedSymbol} />
-            </Card>
-          </div>
-          
-          <Card className="p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">
-                {selectedSymbol} Details
-              </h2>
-              <Button
-                onClick={() => setSelectedSymbol('')}
-                size="sm"
-                variant="outline"
-              >
-                Clear
-              </Button>
-            </div>
-            
-            {priceData.length > 0 && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="text-center p-3 bg-blue-50 rounded">
-                    <div className="text-lg font-bold text-blue-600">
-                      ₹{priceData[priceData.length - 1]?.close_price.toFixed(2)}
-                    </div>
-                    <div className="text-xs text-gray-600">Latest Close</div>
-                  </div>
-                  <div className="text-center p-3 bg-green-50 rounded">
-                    <div className="text-lg font-bold text-green-600">
-                      {priceData.length}
-                    </div>
-                    <div className="text-xs text-gray-600">Records</div>
-                  </div>
-                </div>
-                
-                <div className="p-3 bg-gray-50 rounded">
-                  <h4 className="font-medium mb-2">Price Range</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between">
-                      <span>High:</span>
-                      <span className="font-medium">₹{Math.max(...priceData.map(p => p.high_price)).toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Low:</span>
-                      <span className="font-medium">₹{Math.min(...priceData.map(p => p.low_price)).toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Avg Volume:</span>
-                      <span className="font-medium">{Math.round(priceData.reduce((acc, p) => acc + p.volume, 0) / priceData.length).toLocaleString()}</span>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="flex gap-2">
-                  <Input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="text-sm"
-                  />
-                  <Input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="text-sm"
-                  />
-                </div>
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
-
-      {/* Historical Data Table */}
-      {selectedSymbol && priceData.length > 0 && (
-        <Card className="p-6">
-          <h2 className="text-xl font-semibold mb-4">Historical Data - {selectedSymbol}</h2>
-
-          {priceLoading ? (
-            <div className="flex justify-center py-8">
-              <div className="text-gray-500">Loading price data...</div>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full border-collapse border border-gray-300">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="border border-gray-300 px-4 py-2 text-left">Date</th>
-                    <th className="border border-gray-300 px-4 py-2 text-right">Open</th>
-                    <th className="border border-gray-300 px-4 py-2 text-right">High</th>
-                    <th className="border border-gray-300 px-4 py-2 text-right">Low</th>
-                    <th className="border border-gray-300 px-4 py-2 text-right">Close</th>
-                    <th className="border border-gray-300 px-4 py-2 text-right">Volume</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {priceData.slice(0, 100).map((record, index) => (
-                    <tr key={record._id || `${record.symbol}-${record.date}-${index}`} className="hover:bg-gray-50">
-                      <td className="border border-gray-300 px-4 py-2">
-                        {new Date(record.date).toLocaleDateString()}
-                      </td>
-                      <td className="border border-gray-300 px-4 py-2 text-right">
-                        ₹{record.open_price.toFixed(2)}
-                      </td>
-                      <td className="border border-gray-300 px-4 py-2 text-right">
-                        ₹{record.high_price.toFixed(2)}
-                      </td>
-                      <td className="border border-gray-300 px-4 py-2 text-right">
-                        ₹{record.low_price.toFixed(2)}
-                      </td>
-                      <td className="border border-gray-300 px-4 py-2 text-right">
-                        ₹{record.close_price.toFixed(2)}
-                      </td>
-                      <td className="border border-gray-300 px-4 py-2 text-right">
-                        {record.volume.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {priceData.length > 100 && (
-                <div className="text-gray-500 text-center py-4">
-                  Showing first 100 records of {priceData.length} total records
-                </div>
-              )}
-            </div>
-          )}
-        </Card>
-      )}
-
-      {/* Show message when no symbol selected */}
-      {!selectedSymbol && (
-        <Card className="p-8">
-          <div className="text-center text-gray-500">
-            <ChartBarIcon className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-            <h3 className="text-lg font-medium mb-2">No Symbol Selected</h3>
-            <p>Select a symbol from the mappings table above to view its price data and charts.</p>
-          </div>
-        </Card>
-      )}
     </div>
+    </DashboardLayout>
   );
 }

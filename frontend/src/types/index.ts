@@ -108,7 +108,10 @@ export interface SymbolMapping {
   nse_name: string | null;
   match_confidence: number | null;
   last_updated: string | null;
-  is_up_to_date?: boolean | null; // New field for up-to-date status based on gap analysis
+  is_up_to_date?: boolean | null; // Up-to-date status stored in database
+  data_quality_score?: number | null; // Quality score 0-100 based on data completeness
+  last_status_check?: string | null; // When status was last calculated
+  last_data_update?: string | null; // When data was last loaded/synced
 }
 
 export interface SymbolMappingResponse {
@@ -160,7 +163,7 @@ export interface DownloadStockDataRequest {
   industry?: string;
   start_date?: string;
   end_date?: string;
-  sync_mode?: 'load' | 'refresh' | 'delete';
+  sync_mode?: 'load' | 'sync' | 'refresh' | 'delete';
 }
 
 export interface ProgressUpdate {
@@ -217,6 +220,7 @@ export interface SymbolMappingFilters {
   symbols?: string[];
   mapped_only?: boolean;
   industry?: string;
+  symbol_search?: string;
 }
 
 // Chart Types

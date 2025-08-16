@@ -34,6 +34,11 @@ class SymbolMapping:
     nse_name: Optional[str] = None
     match_confidence: Optional[float] = None
     last_updated: Optional[datetime] = None
+    # Enhanced up-to-date status management
+    is_up_to_date: Optional[bool] = None
+    last_status_check: Optional[datetime] = None
+    data_quality_score: Optional[float] = None  # 0-100 score based on data completeness
+    last_data_update: Optional[datetime] = None  # When data was last loaded/synced
 
 
 @dataclass

@@ -116,7 +116,13 @@ class APIClient {
       const queryParams = [];
       
       if (filters?.index_name) {
-        queryParams.push(`index_filter=${encodeURIComponent(filters.index_name)}`);
+        queryParams.push(`index_name=${encodeURIComponent(filters.index_name)}`);
+      }
+      if (filters?.industry) {
+        queryParams.push(`industry=${encodeURIComponent(filters.industry)}`);
+      }
+      if (filters?.symbol_search) {
+        queryParams.push(`symbol_search=${encodeURIComponent(filters.symbol_search)}`);
       }
       if (filters?.mapped_only !== undefined) {
         queryParams.push(`mapped_only=${filters.mapped_only}`);
@@ -135,7 +141,7 @@ class APIClient {
         url += `?${queryParams.join('&')}`;
       }
 
-      return await this.request<SymbolMappingResponse>(url);
+      return await this.directRequest<SymbolMappingResponse>(url);
     } catch (error) {
       console.error('Failed to fetch symbol mappings:', error);
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch symbol mappings');
@@ -144,7 +150,7 @@ class APIClient {
 
   async updateUpToDateStatus(symbols?: string[]): Promise<{ success: boolean; message: string; updated_count: number }> {
     try {
-      return await this.request(`/stock/mappings/update-status`, {
+      return await this.directRequest(`/stock/mappings/update-status`, {
         method: 'POST',
         body: JSON.stringify({ symbols })
       });
@@ -155,7 +161,7 @@ class APIClient {
 
   async refreshSymbolMappings(): Promise<{ success: boolean; message: string; total_mappings: number }> {
     try {
-      return await this.request(`/stock/mappings/refresh`, {
+      return await this.directRequest(`/stock/mappings/refresh`, {
         method: 'POST'
       });
     } catch (error) {
@@ -163,7 +169,7 @@ class APIClient {
     }
   }
 
-  async getStockData(symbol: string, startDate?: string, endDate?: string, limit: number = 100): Promise<StockDataResponse> {
+  async getStockData(symbol: string, startDate?: string, endDate?: string, limit: number = 5000): Promise<StockDataResponse> {
     try {
       const params = new URLSearchParams();
       if (startDate) params.append('start_date', startDate);
@@ -171,7 +177,7 @@ class APIClient {
       if (limit) params.append('limit', limit.toString());
 
       const url = `/stock/data/${encodeURIComponent(symbol)}${params.toString() ? `?${params.toString()}` : ''}`;
-      return await this.request<StockDataResponse>(url);
+      return await this.directRequest<StockDataResponse>(url);
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch stock data');
     }
@@ -179,7 +185,7 @@ class APIClient {
 
   async getStockDataStatistics(): Promise<StockDataStatistics> {
     try {
-      return await this.request<StockDataStatistics>('/stock/statistics');
+      return await this.directRequest<StockDataStatistics>('/stock/statistics');
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch stock data statistics');
     }
@@ -190,7 +196,8 @@ class APIClient {
       // Use the backend gaps API for accurate gap analysis
       const gapRequest: any = {
         start_date: request.start_date,
-        end_date: request.end_date
+        end_date: request.end_date,
+        full_historical_analysis: request.full_check || false  // Map full_check to full_historical_analysis
       };
 
       if (request.symbol) {
@@ -286,7 +293,7 @@ class APIClient {
     }
     
     try {
-      const response: any = await this.request('/stock/download', {
+      const response: any = await this.directRequest('/stock/download', {
         method: 'POST',
         body: JSON.stringify(legacyRequest),
       });
@@ -298,6 +305,34 @@ class APIClient {
       };
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to download stock data');
+    }
+  }
+
+  async loadSymbolData(symbol: string, syncMode: 'load' | 'refresh' = 'load'): Promise<{ success: boolean; message: string }> {
+    try {
+      const response = await this.directRequest(`/stock/data/load/${encodeURIComponent(symbol)}?sync_mode=${syncMode}`, {
+        method: 'POST',
+      });
+      
+      return response as { success: boolean; message: string };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to load symbol data');
+    }
+  }
+
+  async updateSymbolStatus(symbols?: string[], forceUpdate: boolean = false): Promise<{ success: boolean; message: string; updated_count: number }> {
+    try {
+      const response = await this.directRequest('/stock/mappings/update-status', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbols: symbols,
+          force_update: forceUpdate
+        }),
+      });
+      
+      return response as { success: boolean; message: string; updated_count: number };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to update symbol status');
     }
   }
 
@@ -365,7 +400,7 @@ class APIClient {
 
   async getProcessProgress(processId: string): Promise<TaskProgress> {
     try {
-      return await this.request<TaskProgress>(`/scheduler/processes/${processId}/progress`);
+      return await this.directRequest<TaskProgress>(`/scheduler/processes/${processId}/progress`);
     } catch (error) {
       console.error('Failed to get process progress:', error);
       throw new Error(error instanceof Error ? error.message : 'Failed to get process progress');
