@@ -141,7 +141,7 @@ class APIClient {
         url += `?${queryParams.join('&')}`;
       }
 
-      return await this.directRequest<SymbolMappingResponse>(url);
+      return await this.request<SymbolMappingResponse>(url); // Use request instead of directRequest for proxy
     } catch (error) {
       console.error('Failed to fetch symbol mappings:', error);
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch symbol mappings');
@@ -177,7 +177,7 @@ class APIClient {
       if (limit) params.append('limit', limit.toString());
 
       const url = `/stock/data/${encodeURIComponent(symbol)}${params.toString() ? `?${params.toString()}` : ''}`;
-      return await this.directRequest<StockDataResponse>(url);
+      return await this.request<StockDataResponse>(url); // Use request instead of directRequest for proxy
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to fetch stock data');
     }

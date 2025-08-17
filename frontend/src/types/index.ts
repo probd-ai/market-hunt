@@ -121,10 +121,9 @@ export interface SymbolMappingResponse {
 }
 
 export interface StockPriceData {
-  _id: string;
   scrip_code: number;
   symbol: string;
-  date: Date;
+  date: string; // API returns ISO string, not Date object
   open_price: number;
   high_price: number;
   low_price: number;
@@ -132,7 +131,6 @@ export interface StockPriceData {
   volume: number;
   value: number;
   year_partition: number;
-  last_updated: Date;
 }
 
 export interface StockDataResponse {

@@ -1,268 +1,154 @@
-'use client';
+import { createChart, ColorType, CandlestickSeries } from 'lightweight-charts';
+import React, { useEffect, useRef } from 'react';
 
-import React, { useEffect, useRef, useState } from 'react';
-import { StockPriceData } from '@/types';
-
-// Dynamic import to avoid SSR issues
-const createChart = async () => {
-  const { createChart: create, ColorType } = await import('lightweight-charts');
-  return { create, ColorType };
-};
+interface StockData {
+  date: string;
+  open_price: number;
+  high_price: number;
+  low_price: number;
+  close_price: number;
+  volume: number;
+}
 
 interface TradingViewChartProps {
-  data: StockPriceData[];
-  symbol: string;
+  data: StockData[];
+  symbol?: string;
   chartType?: 'candlestick' | 'line' | 'area';
   height?: number;
+  colors?: {
+    backgroundColor?: string;
+    lineColor?: string;
+    textColor?: string;
+    upColor?: string;
+    downColor?: string;
+    borderUpColor?: string;
+    borderDownColor?: string;
+    wickUpColor?: string;
+    wickDownColor?: string;
+  };
 }
 
-export function TradingViewChart({ 
-  data, 
-  symbol, 
-  chartType = 'candlestick', 
-  height = 400 
-}: TradingViewChartProps) {
+export const TradingViewChart: React.FC<TradingViewChartProps> = (props) => {
+  const {
+    data,
+    symbol,
+    chartType = 'candlestick',
+    height = 400,
+    colors: {
+      backgroundColor = 'white',
+      textColor = 'black',
+      upColor = '#26a69a',
+      downColor = '#ef5350',
+      borderUpColor = '#26a69a',
+      borderDownColor = '#ef5350',
+      wickUpColor = '#26a69a',
+      wickDownColor = '#ef5350',
+    } = {},
+  } = props;
+
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<any>(null);
-  const seriesRef = useRef<any>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isChartReady, setIsChartReady] = useState(false);
 
-  // Convert StockPriceData to TradingView format
-  const formatDataForChart = React.useMemo(() => {
-    if (!data || data.length === 0) return [];
-    
-    const sortedData = [...data].sort((a, b) => 
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
-
-    return sortedData.map(item => {
-      const timestamp = Math.floor(new Date(item.date).getTime() / 1000) as any; // Cast to Time type
-      
-      if (chartType === 'candlestick') {
-        return {
-          time: timestamp,
-          open: item.open_price,
-          high: item.high_price,
-          low: item.low_price,
-          close: item.close_price,
-        };
-      } else { // line or area
-        return {
-          time: timestamp,
-          value: item.close_price,
-        };
-      }
+  useEffect(() => {
+    console.log('🔄 TradingViewChart useEffect triggered:', {
+      hasContainer: !!chartContainerRef.current,
+      hasData: !!data,
+      dataLength: data?.length || 0,
+      symbol,
+      chartType,
+      height
     });
-  }, [data, chartType]);
 
-  // Volume data for volume series
-  const volumeData = React.useMemo(() => {
-    if (!data || data.length === 0) return [];
+    if (!chartContainerRef.current || !data || data.length === 0) {
+      console.log('❌ TradingViewChart: Missing requirements', {
+        hasContainer: !!chartContainerRef.current,
+        hasData: !!data,
+        dataLength: data?.length || 0
+      });
+      return;
+    }
+
+    const handleResize = () => {
+      if (chartContainerRef.current && chart) {
+        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      }
+    };
+
+    // Create the chart
+    const chart = createChart(chartContainerRef.current, {
+      layout: {
+        background: { type: ColorType.Solid, color: backgroundColor },
+        textColor,
+      },
+      width: chartContainerRef.current.clientWidth,
+      height: height,
+      grid: {
+        vertLines: {
+          color: 'rgba(197, 203, 206, 0.5)',
+        },
+        horzLines: {
+          color: 'rgba(197, 203, 206, 0.5)',
+        },
+      },
+      crosshair: {
+        mode: 1,
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(197, 203, 206, 0.8)',
+      },
+      timeScale: {
+        borderColor: 'rgba(197, 203, 206, 0.8)',
+      },
+    });
+
+    // Add candlestick series
+    const candlestickSeries = chart.addSeries(CandlestickSeries, {
+      upColor: upColor,
+      downColor: downColor,
+      borderUpColor: borderUpColor,
+      borderDownColor: borderDownColor,
+      wickUpColor: wickUpColor,
+      wickDownColor: wickDownColor,
+    });
+
+    // Transform data to match lightweight-charts format
+    // Transform data for chart
+    const chartData = data?.map((item: StockData) => ({
+      time: new Date(item.date).toISOString().split('T')[0], // Convert to yyyy-mm-dd format
+      open: item.open_price,
+      high: item.high_price,
+      low: item.low_price,
+      close: item.close_price,
+    })) || [];
     
-    const sortedData = [...data].sort((a, b) => 
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
+    // Sort data by date to ensure proper ordering
+    chartData.sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
-    return sortedData.map(item => ({
-      time: Math.floor(new Date(item.date).getTime() / 1000) as any, // Cast to Time type
-      value: item.volume,
-      color: item.close_price > item.open_price ? '#26a69a' : '#ef5350',
-    }));
-  }, [data]);
+    console.log('📊 Chart data prepared:', {
+      totalPoints: chartData.length,
+      firstPoint: chartData[0],
+      lastPoint: chartData[chartData.length - 1],
+      sampleData: chartData.slice(0, 3)
+    });
 
-  // Initialize chart once
-  useEffect(() => {
-    if (!chartContainerRef.current) return;
+    // Set data to the series
+    candlestickSeries.setData(chartData);
+    console.log('✅ Chart data set successfully');
 
-    const initChart = async () => {
-      setIsLoading(true);
-      
-      try {
-        const { create, ColorType } = await createChart();
-        
-        // Create chart
-        const chart = create(chartContainerRef.current!, {
-          layout: {
-            background: { type: ColorType.Solid, color: 'white' },
-            textColor: 'black',
-          },
-          width: chartContainerRef.current!.clientWidth,
-          height: height,
-          grid: {
-            vertLines: {
-              color: '#e1e1e1',
-            },
-            horzLines: {
-              color: '#e1e1e1',
-            },
-          },
-          crosshair: {
-            mode: 1 as any,
-          },
-          rightPriceScale: {
-            borderColor: '#cccccc',
-          },
-          timeScale: {
-            borderColor: '#cccccc',
-            timeVisible: true,
-            secondsVisible: false,
-          },
-        });
+    // Fit content to show all data
+    chart.timeScale().fitContent();
+    console.log('✅ Chart fitted to content');
 
-        // Store chart reference
-        chartRef.current = chart;
-        setIsChartReady(true);
-        setIsLoading(false);
+    // Add resize listener
+    window.addEventListener('resize', handleResize);
 
-        // Handle resize
-        const handleResize = () => {
-          if (chart && chartContainerRef.current) {
-            chart.applyOptions({ 
-              width: chartContainerRef.current.clientWidth 
-            });
-          }
-        };
-
-        window.addEventListener('resize', handleResize);
-
-        // Cleanup function
-        return () => {
-          window.removeEventListener('resize', handleResize);
-          if (chart) {
-            chart.remove();
-          }
-          chartRef.current = null;
-          seriesRef.current = null;
-          setIsChartReady(false);
-        };
-      } catch (error) {
-        console.error('Error initializing chart:', error);
-        setIsLoading(false);
-      }
+    // Cleanup function
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.remove();
     };
+  }, [data, backgroundColor, textColor, upColor, downColor, borderUpColor, borderDownColor, wickUpColor, wickDownColor, height]);
 
-    initChart();
-  }, [height]); // Only depend on height
-
-  // Update chart data and type
-  useEffect(() => {
-    if (!chartRef.current || !isChartReady || formatDataForChart.length === 0) return;
-
-    const updateChart = async () => {
-      try {
-        // Import series types for v5 API
-        const { CandlestickSeries, LineSeries, AreaSeries, HistogramSeries } = await import('lightweight-charts');
-        
-        // Remove existing series if any
-        if (seriesRef.current) {
-          chartRef.current.removeSeries(seriesRef.current);
-        }
-
-        // Create main price series based on chart type using v5 API
-        let mainSeries: any;
-        
-        if (chartType === 'candlestick') {
-          mainSeries = chartRef.current.addSeries(CandlestickSeries, {
-            upColor: '#26a69a',
-            downColor: '#ef5350',
-            borderUpColor: '#26a69a',
-            borderDownColor: '#ef5350',
-            wickUpColor: '#26a69a',
-            wickDownColor: '#ef5350',
-          });
-        } else if (chartType === 'line') {
-          mainSeries = chartRef.current.addSeries(LineSeries, {
-            color: '#2962FF',
-            lineWidth: 2,
-          });
-        } else { // area
-          mainSeries = chartRef.current.addSeries(AreaSeries, {
-            lineColor: '#2962FF',
-            topColor: '#2962FF',
-            bottomColor: 'rgba(41, 98, 255, 0.28)',
-          });
-        }
-
-        // Add volume series using v5 API
-        const volumeSeries = chartRef.current.addSeries(HistogramSeries, {
-          color: '#26a69a',
-          priceFormat: {
-            type: 'volume',
-          },
-          priceScaleId: 'volume',
-        });
-
-        // Set data
-        mainSeries.setData(formatDataForChart);
-        volumeSeries.setData(volumeData);
-
-        // Auto-fit the chart to data
-        chartRef.current.timeScale().fitContent();
-
-        // Store series reference
-        seriesRef.current = mainSeries;
-
-      } catch (error) {
-        console.error('Error updating chart:', error);
-      }
-    };
-
-    updateChart();
-  }, [formatDataForChart, volumeData, chartType, isChartReady]);
-
-  if (!data || data.length === 0) {
-    return (
-      <div 
-        className="flex items-center justify-center border rounded bg-gray-50"
-        style={{ height: `${height}px` }}
-      >
-        <div className="text-center text-gray-500">
-          <div className="text-2xl mb-2">📊</div>
-          <div>No data available for {symbol}</div>
-          <div className="text-sm mt-1">Select a symbol with historical data</div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="relative">
-      {isLoading && (
-        <div 
-          className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10"
-          style={{ height: `${height}px` }}
-        >
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-            <div className="mt-2 text-sm text-gray-600">Rendering chart...</div>
-          </div>
-        </div>
-      )}
-      
-      <div 
-        ref={chartContainerRef} 
-        className="w-full border rounded"
-        style={{ height: `${height}px` }}
-      />
-      
-      {/* Chart Info */}
-      <div className="mt-2 text-xs text-gray-500 flex justify-between items-center">
-        <div>
-          <span className="font-medium">{symbol}</span> • 
-          <span className="ml-1">{formatDataForChart.length} data points</span> • 
-          <span className="ml-1 capitalize">{chartType} chart</span>
-        </div>
-        <div className="text-right">
-          {data.length > 0 && (
-            <span>
-              {new Date(data[0].date).toLocaleDateString()} - {new Date(data[data.length - 1].date).toLocaleDateString()}
-            </span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+  return <div ref={chartContainerRef} style={{ width: '100%', height: `${height}px` }} />;
+};
 
 export default TradingViewChart;
