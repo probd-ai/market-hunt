@@ -61,6 +61,7 @@ build/
 system_report_*.json
 *.tmp
 *.temp
+nohup.out
 
 # CSV verification files
 *_verification.csv
