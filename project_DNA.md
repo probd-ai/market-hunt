@@ -276,6 +276,7 @@ python IndexManagement.py show-stats
 
 ## 🌐 Access Points
 - **Frontend**: http://localhost:3000
+- **Chart Interface**: http://localhost:3000/chart?symbol=ABB
 - **API**: http://localhost:3001
 - **API Docs**: http://localhost:3001/docs
 - **Repository**: https://github.com/probd-ai/market_hunt.git
