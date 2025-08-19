@@ -16,7 +16,8 @@ import {
   XCircleIcon,
   MagnifyingGlassIcon,
   ChartBarIcon,
-  ClockIcon
+  ClockIcon,
+  PresentationChartLineIcon
 } from '@heroicons/react/24/outline';
 
 export default function DataLoadManagementPage() {
@@ -391,13 +392,15 @@ export default function DataLoadManagementPage() {
                             {mapping.nse_scrip_code && (
                               <Button
                                 size="sm"
-                                variant={gapStatus?.needs_update ? "primary" : "outline"}
-                                onClick={() => downloadStockMutation.mutate(mapping.symbol)}
-                                disabled={downloadStockMutation.isPending}
+                                variant="outline"
+                                onClick={() => {
+                                  const chartUrl = `/chart?symbol=${mapping.symbol}`;
+                                  window.open(chartUrl, '_blank');
+                                }}
                                 className="flex items-center gap-1"
                               >
-                                <CloudArrowDownIcon className="h-4 w-4" />
-                                {gapStatus?.needs_update ? 'Update' : 'Download'}
+                                <PresentationChartLineIcon className="h-4 w-4" />
+                                Open Chart
                               </Button>
                             )}
                           </td>

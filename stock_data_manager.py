@@ -294,17 +294,23 @@ class StockDataManager:
         all_records = []
         mongo_sort_direction = DESCENDING if sort_order == -1 else ASCENDING
         
-        for year in range(start_year, end_year + 1):
+        # If descending sort, iterate years in reverse order for efficiency
+        if sort_order == -1:
+            year_range = range(end_year, start_year - 1, -1)  # 2025, 2024, 2023, ..., 2005
+        else:
+            year_range = range(start_year, end_year + 1)      # 2005, 2006, 2007, ..., 2025
+        
+        for year in year_range:
             try:
                 collection = await self._get_price_collection(year)
                 
                 cursor = collection.find(query).sort("date", mongo_sort_direction)
-                if limit and len(all_records) + await collection.count_documents(query) > limit:
+                if limit and len(all_records) >= limit:
+                    break
+                
+                if limit:
                     remaining = limit - len(all_records)
-                    if remaining > 0:
-                        cursor = cursor.limit(remaining)
-                    else:
-                        break
+                    cursor = cursor.limit(remaining)
                 
                 documents = await cursor.to_list(length=None)
                 
@@ -313,11 +319,15 @@ class StockDataManager:
                     doc.pop('_id', None)
                     all_records.append(PriceData(**doc))
                     
+                # If we have enough records, break early
+                if limit and len(all_records) >= limit:
+                    break
+                    
             except Exception as e:
                 logger.warning(f"⚠️ Error querying partition for year {year}: {e}")
                 continue
         
-        # Sort by date and apply limit
+        # Final sort by date and apply limit (just in case)
         all_records.sort(key=lambda x: x.date, reverse=(sort_order == -1))
         if limit:
             all_records = all_records[:limit]
@@ -349,30 +359,17 @@ class StockDataManager:
                 date_query["$lte"] = end_date
             query["date"] = date_query
         
-        # Determine which partitions to query
-        if start_date and end_date:
-            start_year = start_date.year
-            end_year = end_date.year
-        elif start_date:
-            start_year = start_date.year
-            end_year = datetime.now().year
-        elif end_date:
-            start_year = 2005  # Our earliest data
-            end_year = end_date.year
-        else:
-            # Query all partitions
-            start_year = 2005
-            end_year = datetime.now().year
+        # Get all price collections and count records
+        collections = await self.get_all_price_collections()
         
-        # Count records across relevant partitions
         total_count = 0
-        for year in range(start_year, end_year + 1):
+        for collection_name in collections:
             try:
-                collection = await self._get_price_collection(year)
+                collection = self.db[collection_name]
                 count = await collection.count_documents(query)
                 total_count += count
             except Exception as e:
-                logger.warning(f"⚠️ Error counting partition for year {year}: {e}")
+                logger.warning(f"⚠️ Error counting partition {collection_name}: {e}")
                 continue
         
         return total_count

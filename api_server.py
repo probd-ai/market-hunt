@@ -740,7 +740,7 @@ async def get_stock_price_data(
     symbol: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: Optional[int] = 100
+    limit: Optional[int] = 1000  # Increased default limit
 ):
     """Get historical price data for a symbol"""
     try:
@@ -754,11 +754,20 @@ async def get_stock_price_data(
         end_dt = datetime.fromisoformat(end_date) if end_date else None
         
         async with StockDataManager() as manager:
+            # Get total count without limit for progress tracking
+            total_count = await manager.get_price_data_count(
+                symbol=symbol,
+                start_date=start_dt,
+                end_date=end_dt
+            )
+            
+            # Get actual data with limit (sorted by date descending - newest first)
             price_data = await manager.get_price_data(
                 symbol=symbol,
                 start_date=start_dt,
                 end_date=end_dt,
-                limit=limit
+                limit=limit,
+                sort_order=-1  # -1 for descending (newest first)
             )
             
             # Convert to dict for JSON serialization
@@ -780,7 +789,8 @@ async def get_stock_price_data(
             
             return JSONResponse(content={
                 "symbol": symbol,
-                "total_records": len(price_records),
+                "total_records": total_count,  # Actual total count
+                "returned_records": len(price_records),  # Records in this response
                 "data": price_records
             })
             
