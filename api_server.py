@@ -16,6 +16,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import uvicorn
 import asyncio
+import pandas as pd  # Added for indicator optimizations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -73,6 +74,36 @@ class URLConfig(BaseModel):
 
 class ProcessURLRequest(BaseModel):
     url_ids: List[str]
+
+class IndicatorRequest(BaseModel):
+    symbol: str
+    indicator_type: str
+    period: Optional[int] = 20
+    fast_period: Optional[int] = 12
+    slow_period: Optional[int] = 26
+    signal_period: Optional[int] = 9
+    std_dev: Optional[float] = 2.0
+    base_symbol: Optional[str] = "Nifty 500"  # Default base for CRS
+    lookback: Optional[List[int]] = None  # Multiple lookback periods for Dynamic Fibonacci
+    start_date: Optional[str] = None  # ISO format: YYYY-MM-DD
+    end_date: Optional[str] = None    # ISO format: YYYY-MM-DD
+    price_field: Optional[str] = "close_price"  # Field to use for calculation
+    
+    # TrueValueX specific parameters
+    s1: Optional[int] = None  # Alpha (short lookback)
+    m2: Optional[int] = None  # Beta (mid lookback)
+    l3: Optional[int] = None  # Gamma (long lookback)
+    strength: Optional[int] = None  # Trend Strength (bars)
+    w_long: Optional[float] = None  # Weight Long
+    w_mid: Optional[float] = None   # Weight Mid
+    w_short: Optional[float] = None # Weight Short
+    deadband_frac: Optional[float] = None  # Deadband γ (fraction of range)
+    min_deadband: Optional[float] = None   # Minimum Deadband
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 # Helper function to serialize MongoDB documents
 def serialize_doc(doc):
@@ -133,8 +164,19 @@ async def get_data_overview():
         
         collection = mongo_conn.db.index_meta
         
-        # Get total documents
-        total_documents = collection.count_documents({})
+        # Get total unique companies (by Symbol)
+        unique_companies_pipeline = [
+            {
+                "$group": {
+                    "_id": "$Symbol"
+                }
+            },
+            {
+                "$count": "unique_companies"
+            }
+        ]
+        unique_companies_result = list(collection.aggregate(unique_companies_pipeline))
+        unique_companies_count = unique_companies_result[0]["unique_companies"] if unique_companies_result else 0
         
         # Get index-wise statistics
         pipeline = [
@@ -155,7 +197,7 @@ async def get_data_overview():
                 stat['last_update'] = stat['last_update'].isoformat() if hasattr(stat['last_update'], 'isoformat') else str(stat['last_update'])
         
         return JSONResponse(content={
-            "total_documents": total_documents,
+            "total_documents": unique_companies_count,
             "index_stats": index_stats
         })
         
@@ -208,8 +250,19 @@ async def get_industries_overview():
         
         collection = mongo_conn.db.index_meta
         
-        # Get total companies count
-        total_companies = collection.count_documents({})
+        # Get total unique companies count (by Symbol)
+        unique_companies_pipeline = [
+            {
+                "$group": {
+                    "_id": "$Symbol"
+                }
+            },
+            {
+                "$count": "unique_companies"
+            }
+        ]
+        unique_companies_result = list(collection.aggregate(unique_companies_pipeline))
+        unique_companies_count = unique_companies_result[0]["unique_companies"] if unique_companies_result else 0
         
         # Aggregate industry statistics with unique company counts
         pipeline = [
@@ -240,7 +293,7 @@ async def get_industries_overview():
         total_industries = len(industry_stats)
         
         return JSONResponse(content={
-            "total_companies": total_companies,
+            "total_companies": unique_companies_count,
             "total_industries": total_industries,
             "industry_stats": industry_stats
         })
@@ -959,6 +1012,269 @@ def check_stock_gaps(symbols: List[str]):
     except Exception as e:
         logger.error(f"Error checking stock gaps: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check gaps: {str(e)}")
+
+@app.post("/api/stock/indicators")
+async def calculate_stock_indicators(request: IndicatorRequest):
+    """Calculate technical indicators for stock price data - Optimized"""
+    try:
+        if mongo_conn.db is None:
+            raise HTTPException(status_code=500, detail="Database connection not available")
+        
+        from stock_data_manager import StockDataManager
+        from indicator_engine import IndicatorEngine
+        
+        # Optimize date range - if not provided, use smart defaults based on indicator period
+        if not request.start_date or not request.end_date:
+            end_dt = datetime.now()
+            
+            # Calculate minimum required data points (period * 3 for better SMA accuracy)
+            min_points_needed = max(request.period * 3, 100)  
+            
+            # Estimate days needed (accounting for weekends/holidays)
+            days_needed = min_points_needed * 1.5
+            start_dt = end_dt - pd.Timedelta(days=days_needed)
+            
+            logger.info(f"Auto-calculated date range: {start_dt.date()} to {end_dt.date()} for {request.period}-period indicator")
+        else:
+            start_dt = datetime.fromisoformat(request.start_date)
+            end_dt = datetime.fromisoformat(request.end_date)
+        
+        # Get price data with optimized limit
+        async with StockDataManager() as manager:
+            # Calculate appropriate limit based on date range
+            date_range_days = (end_dt - start_dt).days
+            if date_range_days > 365 * 5:  # More than 5 years
+                initial_limit = 50000  # Large limit for ALL timeframe
+            elif date_range_days > 365:    # More than 1 year
+                initial_limit = 20000  # Medium limit for 5Y timeframe
+            else:
+                initial_limit = 10000  # Small limit for 1Y timeframe
+            
+            logger.info(f"Using limit {initial_limit} for {date_range_days} days of data")
+            
+            price_data = await manager.get_price_data(
+                symbol=request.symbol,
+                start_date=start_dt,
+                end_date=end_dt,
+                limit=initial_limit,
+                sort_order=1  # Ascending order for indicator calculation
+            )
+            
+            if not price_data:
+                raise HTTPException(status_code=404, detail=f"No price data found for symbol {request.symbol}")
+            
+            # Check if we have enough data for the indicator
+            if len(price_data) < request.period:
+                # Try to get more data by extending the date range
+                extended_start = start_dt - pd.Timedelta(days=365)  # Go back 1 year
+                logger.info(f"Insufficient data ({len(price_data)} points), extending range to {extended_start.date()}")
+                
+                price_data = await manager.get_price_data(
+                    symbol=request.symbol,
+                    start_date=extended_start,
+                    end_date=end_dt,
+                    limit=20000,
+                    sort_order=1
+                )
+                
+                if len(price_data) < request.period:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Insufficient data for {request.period}-period indicator. Found {len(price_data)} points, need at least {request.period}"
+                    )
+            
+            # Convert price data to dict format for indicator engine (optimized)
+            price_records = []
+            for record in price_data:
+                price_dict = {
+                    "date": record.date.isoformat(),
+                    "close_price": record.close_price,  # Always include close_price
+                }
+                
+                # Only include other fields if needed
+                if request.price_field != 'close_price':
+                    price_dict[request.price_field] = getattr(record, request.price_field)
+                
+                # For MACD, Bollinger, CRS, Dynamic Fibonacci, and TrueValueX indicators, include OHLC
+                if request.indicator_type in ['macd', 'bollinger', 'crs', 'dynamic_fib', 'truevx']:
+                    price_dict.update({
+                        "open_price": record.open_price,
+                        "high_price": record.high_price,
+                        "low_price": record.low_price,
+                        "volume": record.volume,
+                    })
+                
+                price_records.append(price_dict)
+            
+            # Initialize indicator engine
+            engine = IndicatorEngine()
+            
+            # Prepare parameters for indicator calculation
+            calc_params = {
+                "period": request.period,
+                "price_field": request.price_field
+            }
+            
+            # Add specific parameters for different indicators
+            if request.indicator_type == 'macd':
+                calc_params.update({
+                    "fast_period": request.fast_period,
+                    "slow_period": request.slow_period,
+                    "signal_period": request.signal_period
+                })
+            elif request.indicator_type == 'bollinger':
+                calc_params.update({
+                    "std_dev": request.std_dev
+                })
+            elif request.indicator_type == 'crs':
+                calc_params.update({
+                    "base_symbol": request.base_symbol,
+                    "start_date": start_dt.isoformat() if start_dt else None,
+                    "end_date": end_dt.isoformat() if end_dt else None
+                })
+            elif request.indicator_type == 'dynamic_fib':
+                # Set default lookback periods if not provided
+                lookback_periods = request.lookback if request.lookback else [22, 66, 222]
+                calc_params.update({
+                    "lookback": lookback_periods
+                })
+            elif request.indicator_type == 'truevx':
+                calc_params.update({
+                    "base_symbol": request.base_symbol or "Nifty 50",
+                    "start_date": start_dt.isoformat() if start_dt else None,
+                    "end_date": end_dt.isoformat() if end_dt else None
+                })
+            
+            # Calculate indicator (now with caching and optimization)
+            try:
+                calculation_start = datetime.now()
+                
+                # Special handling for CRS and TrueValueX since they're async
+                if request.indicator_type == 'crs':
+                    indicator_data = await engine.calculate_crs(
+                        data=price_records,
+                        base_symbol=request.base_symbol,
+                        start_date=start_dt.isoformat() if start_dt else None,
+                        end_date=end_dt.isoformat() if end_dt else None
+                    )
+                elif request.indicator_type == 'truevx':
+                    # Pass additional TrueValueX parameters
+                    truevx_params = {}
+                    if request.s1 is not None:
+                        truevx_params['s1'] = request.s1
+                    if request.m2 is not None:
+                        truevx_params['m2'] = request.m2
+                    if request.l3 is not None:
+                        truevx_params['l3'] = request.l3
+                    if request.strength is not None:
+                        truevx_params['strength'] = request.strength
+                    if request.w_long is not None:
+                        truevx_params['w_long'] = request.w_long
+                    if request.w_mid is not None:
+                        truevx_params['w_mid'] = request.w_mid
+                    if request.w_short is not None:
+                        truevx_params['w_short'] = request.w_short
+                    if request.deadband_frac is not None:
+                        truevx_params['deadband_frac'] = request.deadband_frac
+                    if request.min_deadband is not None:
+                        truevx_params['min_deadband'] = request.min_deadband
+                    
+                    indicator_data = await engine.calculate_truevx_ranking(
+                        data=price_records,
+                        base_symbol=request.base_symbol or "Nifty 50",
+                        start_date=start_dt.isoformat() if start_dt else None,
+                        end_date=end_dt.isoformat() if end_dt else None,
+                        **truevx_params
+                    )
+                else:
+                    indicator_data = engine.calculate_indicator(
+                        indicator_type=request.indicator_type,
+                        data=price_records,
+                        **calc_params
+                    )
+                calculation_time = (datetime.now() - calculation_start).total_seconds()
+                
+                logger.info(f"Indicator calculation completed in {calculation_time:.3f}s")
+                
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+            
+            return JSONResponse(content={
+                "symbol": request.symbol,
+                "indicator_type": request.indicator_type,
+                "parameters": calc_params,
+                "total_points": len(indicator_data),
+                "price_data_points": len(price_records),
+                "calculation_time_seconds": round(calculation_time, 3),
+                "data": indicator_data
+            })
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating indicators for {request.symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate indicators: {str(e)}")
+
+@app.get("/api/stock/indicators/supported")
+async def get_supported_indicators():
+    """Get list of supported technical indicators"""
+    try:
+        from indicator_engine import IndicatorEngine
+        
+        engine = IndicatorEngine()
+        supported = engine.get_supported_indicators()
+        
+        # Add metadata about each indicator
+        indicator_info = {
+            'sma': {
+                'name': 'Simple Moving Average',
+                'description': 'Average price over a specified period',
+                'parameters': ['period', 'price_field'],
+                'default_period': 20
+            },
+            'ema': {
+                'name': 'Exponential Moving Average', 
+                'description': 'Weighted moving average giving more importance to recent prices',
+                'parameters': ['period', 'price_field'],
+                'default_period': 20
+            },
+            'rsi': {
+                'name': 'Relative Strength Index',
+                'description': 'Momentum oscillator measuring speed and magnitude of price changes',
+                'parameters': ['period', 'price_field'],
+                'default_period': 14,
+                'range': [0, 100]
+            },
+            'macd': {
+                'name': 'Moving Average Convergence Divergence',
+                'description': 'Trend-following momentum indicator',
+                'parameters': ['fast_period', 'slow_period', 'signal_period', 'price_field'],
+                'default_periods': {'fast': 12, 'slow': 26, 'signal': 9}
+            },
+            'bollinger': {
+                'name': 'Bollinger Bands',
+                'description': 'Volatility bands around moving average',
+                'parameters': ['period', 'std_dev', 'price_field'],
+                'default_period': 20,
+                'default_std_dev': 2.0
+            },
+            'truevx': {
+                'name': 'TrueValueX Ranking',
+                'description': 'Advanced ranking system with structural and trend analysis',
+                'parameters': ['base_symbol', 'start_date', 'end_date'],
+                'default_base_symbol': 'Nifty 50',
+                'range': [50, 100]
+            }
+        }
+        
+        return JSONResponse(content={
+            "supported_indicators": supported,
+            "indicator_details": {k: v for k, v in indicator_info.items() if k in supported}
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting supported indicators: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get supported indicators: {str(e)}")
 
 # Background task functions for stock data downloads
 async def download_symbol_data_task(symbol: str, start_date: datetime, end_date: datetime, force_refresh: bool):

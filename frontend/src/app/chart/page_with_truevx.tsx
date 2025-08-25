@@ -203,22 +203,14 @@ function ChartPageContent() {
       const indicatorTimeScale = indicatorChart.current.timeScale();
 
       mainTimeScale.subscribeVisibleTimeRangeChange((timeRange) => {
-        if (timeRange && timeRange.from !== null && timeRange.to !== null) {
-          try {
-            indicatorTimeScale.setVisibleRange(timeRange);
-          } catch (error) {
-            console.warn('Error syncing main to indicator time scale:', error);
-          }
+        if (timeRange) {
+          indicatorTimeScale.setVisibleRange(timeRange);
         }
       });
 
       indicatorTimeScale.subscribeVisibleTimeRangeChange((timeRange) => {
-        if (timeRange && timeRange.from !== null && timeRange.to !== null) {
-          try {
-            mainTimeScale.setVisibleRange(timeRange);
-          } catch (error) {
-            console.warn('Error syncing indicator to main time scale:', error);
-          }
+        if (timeRange) {
+          mainTimeScale.setVisibleRange(timeRange);
         }
       });
     }
@@ -264,9 +256,7 @@ function ChartPageContent() {
 
     try {
       const timeframeConfig = timeframeOptions.find(opt => opt.value === selectedTimeframe);
-      if (!timeframeConfig) {
-        throw new Error('Invalid timeframe');
-      }
+      if (!timeframeConfig) throw new Error('Invalid timeframe');
 
       // Calculate date range based on timeframe
       const endDate = new Date();
@@ -305,19 +295,6 @@ function ChartPageContent() {
 
       // Transform data for TradingView
       const chartData: CandlestickData<UTCTimestamp>[] = result.data
-        .filter((item: StockData) => {
-          // Filter out invalid data
-          return item && 
-                 item.date && 
-                 typeof item.open_price === 'number' && 
-                 typeof item.high_price === 'number' && 
-                 typeof item.low_price === 'number' && 
-                 typeof item.close_price === 'number' &&
-                 !isNaN(item.open_price) &&
-                 !isNaN(item.high_price) &&
-                 !isNaN(item.low_price) &&
-                 !isNaN(item.close_price);
-        })
         .map((item: StockData) => ({
           time: (new Date(item.date).getTime() / 1000) as UTCTimestamp,
           open: item.open_price,
@@ -386,15 +363,9 @@ function ChartPageContent() {
         startDate: startDate.toISOString().split('T')[0],
         endDate: endDate.toISOString().split('T')[0],
         baseSymbol: 'Nifty 50',
-        s1: 22,  // Alpha (short lookback) - Pine Script default
-        m2: 66,  // Beta (mid lookback) - Pine Script default
-        l3: 222, // Gamma (long lookback) - Pine Script default
-        strength: 2, // Trend Strength (bars) - Pine Script default
-        w_long: 1.5,  // Weight Long - Pine Script default
-        w_mid: 1.0,   // Weight Mid - Pine Script default  
-        w_short: 0.5, // Weight Short - Pine Script default
-        deadband_frac: 0.02, // Deadband γ (fraction of range) - Pine Script default
-        min_deadband: 0.001  // Minimum Deadband - Pine Script default
+        s1: 10,  // Short period
+        m2: 30,  // Medium period
+        l3: 60   // Long period
       });
 
       console.log('TrueValueX API Response:', result);
@@ -417,10 +388,6 @@ function ChartPageContent() {
       const meanLongData: LineData<UTCTimestamp>[] = [];
 
       result.data.forEach((item: TrueValueXData) => {
-        if (!item || !item.date || typeof item.truevx_score !== 'number' || isNaN(item.truevx_score)) {
-          return; // Skip invalid data points
-        }
-
         const time = (new Date(item.date).getTime() / 1000) as UTCTimestamp;
         
         // Main TrueValueX score
@@ -429,22 +396,22 @@ function ChartPageContent() {
           value: item.truevx_score,
         });
 
-        // Mean lines (only if they exist and are valid numbers)
-        if (typeof item.mean_short === 'number' && !isNaN(item.mean_short)) {
+        // Mean lines (only if they exist)
+        if (item.mean_short !== null && item.mean_short !== undefined) {
           meanShortData.push({
             time,
             value: item.mean_short,
           });
         }
 
-        if (typeof item.mean_mid === 'number' && !isNaN(item.mean_mid)) {
+        if (item.mean_mid !== null && item.mean_mid !== undefined) {
           meanMidData.push({
             time,
             value: item.mean_mid,
           });
         }
 
-        if (typeof item.mean_long === 'number' && !isNaN(item.mean_long)) {
+        if (item.mean_long !== null && item.mean_long !== undefined) {
           meanLongData.push({
             time,
             value: item.mean_long,
@@ -694,7 +661,7 @@ function ChartPageContent() {
   );
 }
 
-export default function ChartPage() {
+export default function ChartPageWithTrueValueX() {
   return (
     <Suspense fallback={
       <div className="w-full h-screen bg-black flex items-center justify-center">

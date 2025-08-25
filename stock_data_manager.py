@@ -327,12 +327,21 @@ class StockDataManager:
                 logger.warning(f"⚠️ Error querying partition for year {year}: {e}")
                 continue
         
-        # Final sort by date and apply limit (just in case)
-        all_records.sort(key=lambda x: x.date, reverse=(sort_order == -1))
-        if limit:
-            all_records = all_records[:limit]
+        # Deduplicate records by date (in case of partition overlap)
+        seen_dates = set()
+        deduplicated_records = []
+        for record in all_records:
+            if record.date not in seen_dates:
+                seen_dates.add(record.date)
+                deduplicated_records.append(record)
         
-        return all_records
+        # Final sort by date and apply limit
+        deduplicated_records.sort(key=lambda x: x.date, reverse=(sort_order == -1))
+        if limit:
+            deduplicated_records = deduplicated_records[:limit]
+        
+        logger.info(f"📊 Retrieved {len(all_records)} records, after deduplication: {len(deduplicated_records)}")
+        return deduplicated_records
     
     async def get_price_data_count(
         self,

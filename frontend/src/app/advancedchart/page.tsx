@@ -2,17 +2,7 @@
 
 import { useEffect, useRef, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { 
-  createChart, 
-  ColorType, 
-  IChartApi, 
-  ISeriesApi, 
-  CandlestickData, 
-  UTCTimestamp, 
-  CandlestickSeries,
-  LineData,
-  LineSeries
-} from 'lightweight-charts';
+import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, UTCTimestamp, CandlestickSeries, LineData, LineSeries } from 'lightweight-charts';
 import { apiClient } from '@/lib/api';
 
 interface StockData {
@@ -25,28 +15,34 @@ interface StockData {
   volume: number;
 }
 
+interface IndicatorData {
+  date: string;
+  value: number;
+  indicator: string;
+  period: number;
+  price_field: string;
+}
+
 interface StockMapping {
   symbol: string;
   company_name: string;
   industry: string;
 }
 
-interface TrueValueXData {
-  date: string;
-  truevx_score: number;
-  structural_score: number;
-  trend_score: number;
-  mean_short?: number;
-  mean_mid?: number;
-  mean_long?: number;
-}
-
 type TimeframeType = '1Y' | '5Y' | 'ALL';
+type IndicatorType = 'sma';
 
 interface TimeframeOption {
   label: string;
   value: TimeframeType;
   aggregation: 'daily' | 'weekly' | 'monthly';
+}
+
+interface IndicatorConfig {
+  type: IndicatorType;
+  period: number;
+  enabled: boolean;
+  color: string;
 }
 
 const timeframeOptions: TimeframeOption[] = [
@@ -55,27 +51,27 @@ const timeframeOptions: TimeframeOption[] = [
   { label: 'ALL (Monthly)', value: 'ALL', aggregation: 'monthly' }
 ];
 
-function ChartPageContent() {
+function AdvancedChartPageContent() {
   const searchParams = useSearchParams();
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const indicatorContainerRef = useRef<HTMLDivElement>(null);
-  
   const chart = useRef<IChartApi | null>(null);
-  const indicatorChart = useRef<IChartApi | null>(null);
   const candlestickSeries = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const truevxSeries = useRef<ISeriesApi<"Line"> | null>(null);
-  const truevxMeanShortSeries = useRef<ISeriesApi<"Line"> | null>(null);
-  const truevxMeanMidSeries = useRef<ISeriesApi<"Line"> | null>(null);
-  const truevxMeanLongSeries = useRef<ISeriesApi<"Line"> | null>(null);
+  const indicatorSeries = useRef<ISeriesApi<"Line">[]>([]);
   
-  const [symbol, setSymbol] = useState(searchParams.get('symbol') || 'TCS');
+  const [symbol, setSymbol] = useState(searchParams.get('symbol') || 'LT');
   const [searchSymbol, setSearchSymbol] = useState('');
   const [timeframe, setTimeframe] = useState<TimeframeType>('1Y');
   const [loading, setLoading] = useState(false);
   const [indicatorLoading, setIndicatorLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dataCount, setDataCount] = useState(0);
-  const [indicatorCount, setIndicatorCount] = useState(0);
+  
+  // Indicator configuration
+  const [indicators, setIndicators] = useState<IndicatorConfig[]>([
+    { type: 'sma', period: 5, enabled: false, color: '#ff6b6b' },
+    { type: 'sma', period: 20, enabled: false, color: '#4ecdc4' },
+    { type: 'sma', period: 50, enabled: false, color: '#45b7d1' },
+  ]);
   
   // Autocomplete states
   const [stockSymbols, setStockSymbols] = useState<StockMapping[]>([]);
@@ -103,11 +99,10 @@ function ChartPageContent() {
     loadSymbols();
   }, []);
 
-  // Initialize charts
+  // Initialize chart
   useEffect(() => {
-    if (!chartContainerRef.current || !indicatorContainerRef.current) return;
+    if (!chartContainerRef.current) return;
 
-    // Main price chart
     chart.current = createChart(chartContainerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: '#000000' },
@@ -140,101 +135,12 @@ function ChartPageContent() {
       wickDownColor: '#ef5350',
     });
 
-    // TrueValueX indicator chart
-    indicatorChart.current = createChart(indicatorContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#000000' },
-        textColor: '#ffffff',
-      },
-      grid: {
-        vertLines: { color: '#2B2B43' },
-        horzLines: { color: '#2B2B43' },
-      },
-      crosshair: {
-        mode: 1,
-      },
-      rightPriceScale: {
-        borderColor: '#2B2B43',
-        visible: true,
-        entireTextOnly: true,
-      },
-      timeScale: {
-        borderColor: '#2B2B43',
-        timeVisible: true,
-        secondsVisible: false,
-        visible: false, // Hide time scale on indicator chart
-      },
-      width: indicatorContainerRef.current.clientWidth,
-      height: indicatorContainerRef.current.clientHeight,
-    });
-
-    // Add TrueValueX series
-    truevxSeries.current = indicatorChart.current.addSeries(LineSeries, {
-      color: '#2196F3',
-      lineWidth: 2,
-      title: 'TrueValueX',
-    });
-
-    // Add mean lines
-    truevxMeanShortSeries.current = indicatorChart.current.addSeries(LineSeries, {
-      color: '#4CAF50',
-      lineWidth: 1,
-      title: 'Mean Short',
-      lineStyle: 2, // Dashed
-    });
-
-    truevxMeanMidSeries.current = indicatorChart.current.addSeries(LineSeries, {
-      color: '#FF9800',
-      lineWidth: 1,
-      title: 'Mean Mid',
-      lineStyle: 2, // Dashed
-    });
-
-    truevxMeanLongSeries.current = indicatorChart.current.addSeries(LineSeries, {
-      color: '#F44336',
-      lineWidth: 1,
-      title: 'Mean Long',
-      lineStyle: 2, // Dashed
-    });
-
-    // Sync the time scales of both charts
-    if (chart.current && indicatorChart.current) {
-      const mainTimeScale = chart.current.timeScale();
-      const indicatorTimeScale = indicatorChart.current.timeScale();
-
-      mainTimeScale.subscribeVisibleTimeRangeChange((timeRange) => {
-        if (timeRange && timeRange.from !== null && timeRange.to !== null) {
-          try {
-            indicatorTimeScale.setVisibleRange(timeRange);
-          } catch (error) {
-            console.warn('Error syncing main to indicator time scale:', error);
-          }
-        }
-      });
-
-      indicatorTimeScale.subscribeVisibleTimeRangeChange((timeRange) => {
-        if (timeRange && timeRange.from !== null && timeRange.to !== null) {
-          try {
-            mainTimeScale.setVisibleRange(timeRange);
-          } catch (error) {
-            console.warn('Error syncing indicator to main time scale:', error);
-          }
-        }
-      });
-    }
-
     // Handle resize
     const handleResize = () => {
       if (chart.current && chartContainerRef.current) {
         chart.current.applyOptions({
           width: chartContainerRef.current.clientWidth,
           height: chartContainerRef.current.clientHeight,
-        });
-      }
-      if (indicatorChart.current && indicatorContainerRef.current) {
-        indicatorChart.current.applyOptions({
-          width: indicatorContainerRef.current.clientWidth,
-          height: indicatorContainerRef.current.clientHeight,
         });
       }
     };
@@ -246,27 +152,19 @@ function ChartPageContent() {
       if (chart.current) {
         chart.current.remove();
       }
-      if (indicatorChart.current) {
-        indicatorChart.current.remove();
-      }
     };
   }, []);
 
-  // Load stock price data
-  const loadData = async (symbolToLoad: string, selectedTimeframe: TimeframeType) => {
+  // Load stock data
+  const loadStockData = async (symbolToLoad: string, selectedTimeframe: TimeframeType) => {
     if (!candlestickSeries.current) {
       console.error('Candlestick series not initialized');
-      return;
+      return [];
     }
-
-    setLoading(true);
-    setError(null);
 
     try {
       const timeframeConfig = timeframeOptions.find(opt => opt.value === selectedTimeframe);
-      if (!timeframeConfig) {
-        throw new Error('Invalid timeframe');
-      }
+      if (!timeframeConfig) throw new Error('Invalid timeframe');
 
       // Calculate date range based on timeframe
       const endDate = new Date();
@@ -290,7 +188,7 @@ function ChartPageContent() {
         50000 // Large limit to get all data
       );
 
-      console.log('API Response:', result);
+      console.log('Stock API Response:', result);
 
       if (!result || !Array.isArray(result.data)) {
         console.error('Invalid response format:', result);
@@ -301,23 +199,8 @@ function ChartPageContent() {
         throw new Error(`No data found for symbol ${symbolToLoad}`);
       }
 
-      console.log('Sample data item:', result.data[0]);
-
       // Transform data for TradingView
       const chartData: CandlestickData<UTCTimestamp>[] = result.data
-        .filter((item: StockData) => {
-          // Filter out invalid data
-          return item && 
-                 item.date && 
-                 typeof item.open_price === 'number' && 
-                 typeof item.high_price === 'number' && 
-                 typeof item.low_price === 'number' && 
-                 typeof item.close_price === 'number' &&
-                 !isNaN(item.open_price) &&
-                 !isNaN(item.high_price) &&
-                 !isNaN(item.low_price) &&
-                 !isNaN(item.close_price);
-        })
         .map((item: StockData) => ({
           time: (new Date(item.date).getTime() / 1000) as UTCTimestamp,
           open: item.open_price,
@@ -328,7 +211,6 @@ function ChartPageContent() {
         .sort((a, b) => (a.time as number) - (b.time as number)); // Ensure ascending order
 
       console.log(`Processed ${chartData.length} data points for ${symbolToLoad}`);
-      console.log('Sample chart data:', chartData.slice(0, 3));
       
       // Remove duplicate timestamps
       const uniqueData: CandlestickData<UTCTimestamp>[] = [];
@@ -358,137 +240,186 @@ function ChartPageContent() {
       }
       
       setDataCount(uniqueData.length);
+      return result.data;
 
-      // Load TrueValueX indicator
-      await loadTrueValueXData(symbolToLoad, startDate, endDate);
+    } catch (err) {
+      console.error('Error loading stock data:', err);
+      throw err;
+    }
+  };
+
+  // Load indicator data with performance optimizations
+  const loadIndicatorData = async (symbolToLoad: string, indicator: IndicatorConfig) => {
+    if (!chart.current) return;
+
+    try {
+      console.log(`Loading ${indicator.type} indicator for ${symbolToLoad} with period ${indicator.period}`);
+      
+      const startTime = performance.now();
+      
+      // Calculate date range based on timeframe (same as stock data)
+      const endDate = new Date();
+      let startDate = new Date();
+      
+      if (timeframe === '1Y') {
+        startDate.setFullYear(endDate.getFullYear() - 1);
+      } else if (timeframe === '5Y') {
+        startDate.setFullYear(endDate.getFullYear() - 5);
+      } else {
+        // ALL - start from 2005 (same as stock data)
+        startDate = new Date('2005-01-01');
+      }
+      
+      const response = await fetch('http://localhost:3001/api/stock/indicators', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol: symbolToLoad,
+          indicator_type: indicator.type,
+          period: indicator.period,
+          price_field: 'close_price',
+          start_date: startDate.toISOString().split('T')[0],
+          end_date: endDate.toISOString().split('T')[0]
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch indicator data: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      
+      const loadTime = performance.now() - startTime;
+      console.log(`Indicator API Response (${loadTime.toFixed(0)}ms):`, {
+        total_points: result.total_points,
+        calculation_time: result.calculation_time_seconds,
+        data_sample: result.data?.slice(0, 2)
+      });
+
+      if (!result || !Array.isArray(result.data)) {
+        throw new Error('Invalid indicator response format');
+      }
+
+      // Transform indicator data for TradingView
+      const rawIndicatorData: LineData<UTCTimestamp>[] = result.data
+        .map((item: IndicatorData) => ({
+          time: (new Date(item.date).getTime() / 1000) as UTCTimestamp,
+          value: item.value,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number));
+
+      // Remove duplicate timestamps to prevent TradingView errors
+      const indicatorChartData: LineData<UTCTimestamp>[] = [];
+      const seenTimes = new Set();
+      
+      for (const item of rawIndicatorData) {
+        if (!seenTimes.has(item.time)) {
+          seenTimes.add(item.time);
+          indicatorChartData.push(item);
+        }
+      }
+
+      if (indicatorChartData.length !== rawIndicatorData.length) {
+        console.warn(`Removed ${rawIndicatorData.length - indicatorChartData.length} duplicate timestamps from indicator data`);
+      }
+
+      console.log(`Processed ${indicatorChartData.length} indicator points in ${loadTime.toFixed(0)}ms`);
+
+      // Create line series for this indicator
+      const lineSeries = chart.current.addSeries(LineSeries, {
+        color: indicator.color,
+        lineWidth: 2,
+        title: `${indicator.type.toUpperCase()}(${indicator.period})`,
+      });
+
+      lineSeries.setData(indicatorChartData);
+      indicatorSeries.current.push(lineSeries);
+
+    } catch (err) {
+      console.error('Error loading indicator data:', err);
+      throw err;
+    }
+  };
+
+  // Clear all indicators
+  const clearIndicators = () => {
+    if (chart.current) {
+      indicatorSeries.current.forEach(series => {
+        chart.current?.removeSeries(series);
+      });
+      indicatorSeries.current = [];
+    }
+  };
+
+  // Load data when symbol or timeframe changes
+  const loadData = async () => {
+    if (!symbol) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Clear existing indicators
+      clearIndicators();
+
+      // Load stock data first
+      await loadStockData(symbol, timeframe);
+
+      // Load enabled indicators
+      setIndicatorLoading(true);
+      const enabledIndicators = indicators.filter(ind => ind.enabled);
+      
+      for (const indicator of enabledIndicators) {
+        await loadIndicatorData(symbol, indicator);
+      }
 
     } catch (err) {
       console.error('Error loading data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
       setLoading(false);
-    }
-  };
-
-  // Load TrueValueX indicator data
-  const loadTrueValueXData = async (symbolToLoad: string, startDate: Date, endDate: Date) => {
-    if (!truevxSeries.current) {
-      console.error('TrueValueX series not initialized');
-      return;
-    }
-
-    setIndicatorLoading(true);
-
-    try {
-      console.log(`Loading TrueValueX indicator for ${symbolToLoad}`);
-      
-      const result = await apiClient.getIndicatorData(symbolToLoad, 'truevx', {
-        startDate: startDate.toISOString().split('T')[0],
-        endDate: endDate.toISOString().split('T')[0],
-        baseSymbol: 'Nifty 50',
-        s1: 22,  // Alpha (short lookback) - Pine Script default
-        m2: 66,  // Beta (mid lookback) - Pine Script default
-        l3: 222, // Gamma (long lookback) - Pine Script default
-        strength: 2, // Trend Strength (bars) - Pine Script default
-        w_long: 1.5,  // Weight Long - Pine Script default
-        w_mid: 1.0,   // Weight Mid - Pine Script default  
-        w_short: 0.5, // Weight Short - Pine Script default
-        deadband_frac: 0.02, // Deadband γ (fraction of range) - Pine Script default
-        min_deadband: 0.001  // Minimum Deadband - Pine Script default
-      });
-
-      console.log('TrueValueX API Response:', result);
-
-      if (!result || !Array.isArray(result.data)) {
-        console.error('Invalid TrueValueX response format:', result);
-        throw new Error('Invalid TrueValueX response format');
-      }
-
-      if (result.data.length === 0) {
-        console.warn('No TrueValueX data found');
-        setIndicatorCount(0);
-        return;
-      }
-
-      // Transform TrueValueX data for TradingView
-      const truevxData: LineData<UTCTimestamp>[] = [];
-      const meanShortData: LineData<UTCTimestamp>[] = [];
-      const meanMidData: LineData<UTCTimestamp>[] = [];
-      const meanLongData: LineData<UTCTimestamp>[] = [];
-
-      result.data.forEach((item: TrueValueXData) => {
-        if (!item || !item.date || typeof item.truevx_score !== 'number' || isNaN(item.truevx_score)) {
-          return; // Skip invalid data points
-        }
-
-        const time = (new Date(item.date).getTime() / 1000) as UTCTimestamp;
-        
-        // Main TrueValueX score
-        truevxData.push({
-          time,
-          value: item.truevx_score,
-        });
-
-        // Mean lines (only if they exist and are valid numbers)
-        if (typeof item.mean_short === 'number' && !isNaN(item.mean_short)) {
-          meanShortData.push({
-            time,
-            value: item.mean_short,
-          });
-        }
-
-        if (typeof item.mean_mid === 'number' && !isNaN(item.mean_mid)) {
-          meanMidData.push({
-            time,
-            value: item.mean_mid,
-          });
-        }
-
-        if (typeof item.mean_long === 'number' && !isNaN(item.mean_long)) {
-          meanLongData.push({
-            time,
-            value: item.mean_long,
-          });
-        }
-      });
-
-      console.log(`Processed ${truevxData.length} TrueValueX points`);
-      console.log(`Mean data: Short=${meanShortData.length}, Mid=${meanMidData.length}, Long=${meanLongData.length}`);
-
-      // Set data on series
-      if (truevxSeries.current) {
-        truevxSeries.current.setData(truevxData);
-      }
-      if (truevxMeanShortSeries.current && meanShortData.length > 0) {
-        truevxMeanShortSeries.current.setData(meanShortData);
-      }
-      if (truevxMeanMidSeries.current && meanMidData.length > 0) {
-        truevxMeanMidSeries.current.setData(meanMidData);
-      }
-      if (truevxMeanLongSeries.current && meanLongData.length > 0) {
-        truevxMeanLongSeries.current.setData(meanLongData);
-      }
-
-      if (indicatorChart.current) {
-        indicatorChart.current.timeScale().fitContent();
-      }
-
-      setIndicatorCount(truevxData.length);
-
-    } catch (err) {
-      console.error('Error loading TrueValueX data:', err);
-      // Don't set main error for indicator failure
-    } finally {
       setIndicatorLoading(false);
     }
   };
 
-  // Load data when symbol or timeframe changes
+  // Load data when symbol, timeframe, or indicators change
   useEffect(() => {
-    if (symbol) {
-      loadData(symbol, timeframe);
-    }
+    loadData();
   }, [symbol, timeframe]);
+
+  // Reload indicators when configuration changes (with debouncing)
+  useEffect(() => {
+    if (!loading && symbol) {
+      // Debounce indicator changes to prevent too many API calls
+      const timeoutId = setTimeout(() => {
+        setIndicatorLoading(true);
+        
+        // Clear existing indicators
+        clearIndicators();
+
+        // Load enabled indicators
+        const enabledIndicators = indicators.filter(ind => ind.enabled);
+        
+        if (enabledIndicators.length === 0) {
+          setIndicatorLoading(false);
+          return;
+        }
+        
+        Promise.all(
+          enabledIndicators.map(indicator => loadIndicatorData(symbol, indicator))
+        ).catch(err => {
+          console.error('Error loading indicators:', err);
+          setError(err instanceof Error ? err.message : 'Failed to load indicators');
+        }).finally(() => {
+          setIndicatorLoading(false);
+        });
+      }, 300); // 300ms debounce
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [indicators]);
 
   // Filter symbols based on search input
   useEffect(() => {
@@ -528,26 +459,42 @@ function ChartPageContent() {
     }
   };
 
+  const toggleIndicator = (index: number) => {
+    setIndicators(prev => 
+      prev.map((ind, i) => 
+        i === index ? { ...ind, enabled: !ind.enabled } : ind
+      )
+    );
+  };
+
+  const updateIndicatorPeriod = (index: number, period: number) => {
+    setIndicators(prev => 
+      prev.map((ind, i) => 
+        i === index ? { ...ind, period } : ind
+      )
+    );
+  };
+
   return (
     <div className="w-full h-screen bg-black flex flex-col">
       {/* Header Controls */}
       <div className="flex items-center justify-between p-4 bg-gray-900 border-b border-gray-700">
         <div className="flex items-center space-x-4">
           <h1 className="text-white text-xl font-bold">
-            {symbol} - Stock Chart with TrueValueX
+            {symbol} - Advanced Chart
             {dataCount > 0 && (
               <span className="text-sm text-gray-400 ml-2">
-                ({dataCount.toLocaleString()} price records)
-              </span>
-            )}
-            {indicatorCount > 0 && (
-              <span className="text-sm text-blue-400 ml-2">
-                ({indicatorCount.toLocaleString()} TrueValueX points)
+                ({dataCount.toLocaleString()} records)
               </span>
             )}
             {symbolsLoading && (
               <span className="text-sm text-blue-400 ml-2">
                 (Loading symbols...)
+              </span>
+            )}
+            {indicatorLoading && (
+              <span className="text-sm text-orange-400 ml-2">
+                (Loading indicators...)
               </span>
             )}
           </h1>
@@ -630,15 +577,49 @@ function ChartPageContent() {
         </div>
       </div>
 
+      {/* Indicator Controls */}
+      <div className="flex items-center space-x-4 p-3 bg-gray-800 border-b border-gray-700">
+        <span className="text-white text-sm font-medium">Indicators:</span>
+        {indicators.map((indicator, index) => (
+          <div key={index} className="flex items-center space-x-2">
+            <label className="flex items-center space-x-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={indicator.enabled}
+                onChange={() => toggleIndicator(index)}
+                className="rounded"
+                disabled={loading || indicatorLoading}
+              />
+              <span className="text-white text-sm">
+                {indicator.type.toUpperCase()}
+              </span>
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="200"
+              value={indicator.period}
+              onChange={(e) => updateIndicatorPeriod(index, parseInt(e.target.value) || 1)}
+              disabled={loading || indicatorLoading}
+              className="w-16 px-2 py-1 bg-gray-700 text-white border border-gray-600 rounded text-sm"
+            />
+            <div 
+              className="w-4 h-4 rounded"
+              style={{ backgroundColor: indicator.color }}
+            />
+          </div>
+        ))}
+      </div>
+
       {/* Loading/Error States */}
       {loading && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white text-lg z-10">
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white text-lg">
           Loading {symbol} data...
         </div>
       )}
 
       {error && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-red-500 text-lg text-center z-10">
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-red-500 text-lg text-center">
           <div className="bg-gray-900 p-4 rounded border border-red-500">
             <div className="font-bold">Error loading data:</div>
             <div>{error}</div>
@@ -646,62 +627,24 @@ function ChartPageContent() {
         </div>
       )}
 
-      {/* Charts Container */}
-      <div className="flex-1 w-full flex flex-col">
-        {/* Main Price Chart */}
-        <div 
-          ref={chartContainerRef}
-          className="flex-1 w-full"
-          style={{ minHeight: '400px' }}
-        />
-        
-        {/* TrueValueX Indicator Chart */}
-        <div className="relative">
-          {indicatorLoading && (
-            <div className="absolute top-2 right-2 text-blue-400 text-sm z-10">
-              Loading TrueValueX...
-            </div>
-          )}
-          <div 
-            ref={indicatorContainerRef}
-            className="w-full bg-black border-t border-gray-700"
-            style={{ height: '200px' }}
-          />
-          {/* TrueValueX Legend */}
-          <div className="absolute bottom-2 left-2 text-xs text-gray-400 bg-black bg-opacity-70 p-2 rounded">
-            <div className="flex space-x-4">
-              <span className="flex items-center">
-                <div className="w-3 h-0.5 bg-blue-500 mr-1"></div>
-                TrueValueX
-              </span>
-              <span className="flex items-center">
-                <div className="w-3 h-0.5 bg-green-500 mr-1" style={{borderStyle: 'dashed'}}></div>
-                Short
-              </span>
-              <span className="flex items-center">
-                <div className="w-3 h-0.5 bg-orange-500 mr-1" style={{borderStyle: 'dashed'}}></div>
-                Mid
-              </span>
-              <span className="flex items-center">
-                <div className="w-3 h-0.5 bg-red-500 mr-1" style={{borderStyle: 'dashed'}}></div>
-                Long
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* Chart Container */}
+      <div 
+        ref={chartContainerRef}
+        className="flex-1 w-full"
+        style={{ minHeight: '500px' }}
+      />
     </div>
   );
 }
 
-export default function ChartPage() {
+export default function AdvancedChartPage() {
   return (
     <Suspense fallback={
       <div className="w-full h-screen bg-black flex items-center justify-center">
-        <div className="text-white text-lg">Loading chart...</div>
+        <div className="text-white text-lg">Loading advanced chart...</div>
       </div>
     }>
-      <ChartPageContent />
+      <AdvancedChartPageContent />
     </Suspense>
   );
 }
