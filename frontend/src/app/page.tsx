@@ -4,15 +4,14 @@ import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api as apiClient } from '@/lib/api';
+import { apiClient } from '@/lib/api';
 import { 
   ChartBarIcon, 
   LinkIcon, 
   DocumentTextIcon,
   ClockIcon,
   CheckCircleIcon,
-  ExclamationTriangleIcon,
-  CurrencyDollarIcon
+  ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
 import { formatNumber, formatDate } from '@/lib/utils';
 import Link from 'next/link';
@@ -30,11 +29,6 @@ export default function DashboardPage() {
   const { data: urls } = useQuery({
     queryKey: ['urls'],
     queryFn: () => apiClient.getUrls(),
-  });
-
-  const { data: stockStats } = useQuery({
-    queryKey: ['stockStatistics'],
-    queryFn: () => apiClient.getStockDataStatistics(),
   });
 
   const refreshDataMutation = useMutation({
@@ -76,16 +70,19 @@ export default function DashboardPage() {
       color: 'text-green-600 bg-green-100',
     },
     {
-      name: 'Stock Records',
-      value: stockStats?.total_records || 0,
-      icon: CurrencyDollarIcon,
-      color: 'text-emerald-600 bg-emerald-100',
-    },
-    {
       name: 'Indices Tracked',
       value: dataOverview?.index_stats?.length || 0,
       icon: ChartBarIcon,
       color: 'text-purple-600 bg-purple-100',
+    },
+    {
+      name: 'Last Update',
+      value: dataOverview?.index_stats?.[0]?.last_update 
+        ? formatDate(dataOverview.index_stats[0].last_update)
+        : 'Never',
+      icon: ClockIcon,
+      color: 'text-orange-600 bg-orange-100',
+      isDate: true,
     },
   ];
 
@@ -222,23 +219,13 @@ export default function DashboardPage() {
             <CardTitle>Quick Actions</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <Link href="/urls">
                 <Button className="w-full justify-start h-auto p-4" variant="outline">
                   <LinkIcon className="h-5 w-5 mr-3" />
                   <div className="text-left">
                     <div className="font-medium">Manage URLs</div>
                     <div className="text-xs text-gray-500">Add or edit data sources</div>
-                  </div>
-                </Button>
-              </Link>
-              
-              <Link href="/stocks">
-                <Button className="w-full justify-start h-auto p-4" variant="outline">
-                  <CurrencyDollarIcon className="h-5 w-5 mr-3" />
-                  <div className="text-left">
-                    <div className="font-medium">Stock Data</div>
-                    <div className="text-xs text-gray-500">Download & view price data</div>
                   </div>
                 </Button>
               </Link>

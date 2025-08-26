@@ -186,33 +186,15 @@ class URLManager:
             return False, str(e)
     
     def delete_url(self, url_id):
-        """Delete a URL configuration and all associated data"""
-        try:
-            # First, get the URL configuration to know what index data to delete
-            url_config = self.url_collection.find_one({"_id": ObjectId(url_id)})
-            
-            if not url_config:
-                return False, "No URL configuration found with the given ID"
-                
-            index_name = url_config.get('index_name')
-            
-            # Delete the URL configuration
+        """Delete a URL configuration"""
+        try:            
             result = self.url_collection.delete_one({"_id": ObjectId(url_id)})
             
             if result.deleted_count > 0:
                 logger.info(f"Deleted URL configuration: {url_id}")
-                
-                # Also delete all associated data from index_meta collection
-                if index_name:
-                    data_collection = self.db.index_meta
-                    data_result = data_collection.delete_many({"index_name": index_name})
-                    logger.info(f"Deleted {data_result.deleted_count} data records for index: {index_name}")
-                    
-                    return True, f"URL configuration and {data_result.deleted_count} associated data records deleted successfully"
-                else:
-                    return True, "URL configuration deleted successfully (no index name found)"
+                return True, "URL configuration deleted successfully"
             else:
-                return False, "Failed to delete URL configuration"
+                return False, "No URL configuration found with the given ID"
                 
         except Exception as e:
             logger.error(f"Error deleting URL: {e}")

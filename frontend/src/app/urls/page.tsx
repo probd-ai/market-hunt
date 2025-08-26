@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api as apiClient } from '@/lib/api';
+import { apiClient } from '@/lib/api';
 import { URLConfig, URLFormData } from '@/types';
 import { 
   PlusIcon,
@@ -33,7 +33,7 @@ export default function URLManagementPage() {
   });
 
   const addUrlMutation = useMutation({
-    mutationFn: (data: URLFormData) => apiClient.createUrl(data),
+    mutationFn: (data: URLFormData) => apiClient.addUrl(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['urls'] });
       setIsAddingUrl(false);

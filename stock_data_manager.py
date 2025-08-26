@@ -122,7 +122,7 @@ class StockDataManager:
         return sorted(price_collections)
     
     async def store_symbol_mappings(self, mappings: List[SymbolMapping]) -> Dict[str, int]:
-        """Store symbol mappings in the database, preserving existing status fields"""
+        """Store symbol mappings in the database"""
         logger.info(f"💾 Storing {len(mappings)} symbol mappings...")
         
         collection = self.db.symbol_mappings
@@ -130,33 +130,15 @@ class StockDataManager:
         
         for mapping in mappings:
             try:
-                # Get existing document to preserve status fields
-                existing_doc = await collection.find_one({"_id": mapping.symbol})
-                
                 mapping_doc = asdict(mapping)
                 mapping_doc['_id'] = mapping.symbol  # Use symbol as primary key
-                
-                # Preserve existing status fields if they exist
-                if existing_doc:
-                    status_fields = [
-                        'is_up_to_date', 'data_quality_score', 'last_status_check', 
-                        'last_data_update'
-                    ]
-                    for field in status_fields:
-                        if field in existing_doc and existing_doc[field] is not None:
-                            mapping_doc[field] = existing_doc[field]
-                            mapping_doc[field] = existing_doc[field]
                 
                 await collection.replace_one(
                     {"_id": mapping.symbol},
                     mapping_doc,
                     upsert=True
                 )
-                
-                if existing_doc:
-                    results["updated"] += 1
-                else:
-                    results["inserted"] += 1
+                results["updated" if mapping.nse_scrip_code else "inserted"] += 1
                 
             except Exception as e:
                 logger.error(f"❌ Error storing mapping for {mapping.symbol}: {e}")
@@ -170,7 +152,6 @@ class StockDataManager:
         symbols: List[str] = None, 
         index_name: str = None,
         industry: str = None,
-        symbol_search: str = None,
         mapped_only: bool = False
     ) -> List[SymbolMapping]:
         """Retrieve symbol mappings with optional filters"""
@@ -184,12 +165,6 @@ class StockDataManager:
             query["index_names"] = index_name  # Search in array field
         if industry:
             query["industry"] = industry
-        if symbol_search:
-            # Case-insensitive search in symbol or company_name
-            query["$or"] = [
-                {"symbol": {"$regex": symbol_search, "$options": "i"}},
-                {"company_name": {"$regex": symbol_search, "$options": "i"}}
-            ]
         if mapped_only:
             query["nse_scrip_code"] = {"$ne": None}
         
@@ -203,7 +178,14 @@ class StockDataManager:
             # Handle backward compatibility for old records
             if 'index_name' in doc and 'index_names' not in doc:
                 doc['index_names'] = [doc.pop('index_name')]
-            mappings.append(SymbolMapping(**doc))
+            
+            # Remove any unknown fields that aren't part of SymbolMapping
+            valid_fields = {
+                'company_name', 'symbol', 'industry', 'index_names',
+                'nse_scrip_code', 'nse_symbol', 'nse_name', 'match_confidence', 'last_updated'
+            }
+            filtered_doc = {k: v for k, v in doc.items() if k in valid_fields}
+            mappings.append(SymbolMapping(**filtered_doc))
         
         return mappings
     
@@ -236,15 +218,8 @@ class StockDataManager:
                 doc['_id'] = f"{record.scrip_code}_{record.date.strftime('%Y%m%d')}"
                 documents.append(doc)
             
-            # Bulk upsert with better counting
+            # Bulk upsert
             try:
-                # First, check which records already exist
-                existing_ids = set()
-                if documents:
-                    doc_ids = [doc["_id"] for doc in documents]
-                    cursor = collection.find({"_id": {"$in": doc_ids}}, {"_id": 1})
-                    existing_ids = {doc["_id"] async for doc in cursor}
-                
                 operations = []
                 for doc in documents:
                     operations.append(
@@ -257,19 +232,10 @@ class StockDataManager:
                 
                 if operations:
                     result = await collection.bulk_write(operations, ordered=False)
+                    total_results["inserted"] += result.upserted_count
+                    total_results["updated"] += result.modified_count
                     
-                    # Count actual new records (upserted)
-                    actual_inserted = result.upserted_count
-                    
-                    # Count actual updates (only count if record existed before)
-                    total_processed = len(documents)
-                    existing_count = len(existing_ids)
-                    actual_updated = min(result.modified_count, existing_count)
-                    
-                    total_results["inserted"] += actual_inserted
-                    total_results["updated"] += actual_updated
-                    
-                    logger.info(f"✅ Stored {total_processed} records in partition {year} (New: {actual_inserted}, Updated: {actual_updated}, Existing: {existing_count})")
+                    logger.info(f"✅ Stored {len(documents)} records in partition {year}")
                     
             except BulkWriteError as e:
                 logger.error(f"❌ Bulk write error for year {year}: {e}")
@@ -287,7 +253,8 @@ class StockDataManager:
         scrip_code: int = None,
         start_date: datetime = None,
         end_date: datetime = None,
-        limit: int = None
+        limit: int = None,
+        sort_order: int = -1  # -1 for descending (newest first), 1 for ascending (oldest first)
     ) -> List[PriceData]:
         """Retrieve price data with filters"""
         if not symbol and not scrip_code:
@@ -325,33 +292,25 @@ class StockDataManager:
         
         # Query relevant partitions
         all_records = []
+        mongo_sort_direction = DESCENDING if sort_order == -1 else ASCENDING
         
-        # Get unique partition names to avoid querying same partition multiple times
-        if start_date and end_date:
-            # Get partitions that cover the date range
-            partition_names = set()
-            for year in range(start_date.year, end_date.year + 1):
-                partition_name = self._get_partition_collection_name(year)
-                partition_names.add(partition_name)
+        # If descending sort, iterate years in reverse order for efficiency
+        if sort_order == -1:
+            year_range = range(end_year, start_year - 1, -1)  # 2025, 2024, 2023, ..., 2005
         else:
-            # Query all partitions
-            partition_names = set(await self.get_all_price_collections())
+            year_range = range(start_year, end_year + 1)      # 2005, 2006, 2007, ..., 2025
         
-        # Query each unique partition once
-        for partition_name in sorted(partition_names):
+        for year in year_range:
             try:
-                collection = self.db[partition_name]
+                collection = await self._get_price_collection(year)
                 
-                cursor = collection.find(query).sort("date", DESCENDING)
+                cursor = collection.find(query).sort("date", mongo_sort_direction)
                 if limit and len(all_records) >= limit:
                     break
-                    
+                
                 if limit:
                     remaining = limit - len(all_records)
-                    if remaining > 0:
-                        cursor = cursor.limit(remaining)
-                    else:
-                        break
+                    cursor = cursor.limit(remaining)
                 
                 documents = await cursor.to_list(length=None)
                 
@@ -360,17 +319,70 @@ class StockDataManager:
                     doc.pop('_id', None)
                     all_records.append(PriceData(**doc))
                     
+                # If we have enough records, break early
+                if limit and len(all_records) >= limit:
+                    break
+                    
             except Exception as e:
-                logger.warning(f"⚠️ Error querying partition {partition_name}: {e}")
+                logger.warning(f"⚠️ Error querying partition for year {year}: {e}")
                 continue
         
-        # Sort by date (most recent first) and apply limit
-        all_records.sort(key=lambda x: x.date, reverse=True)
-        if limit:
-            all_records = all_records[:limit]
+        # Deduplicate records by date (in case of partition overlap)
+        seen_dates = set()
+        deduplicated_records = []
+        for record in all_records:
+            if record.date not in seen_dates:
+                seen_dates.add(record.date)
+                deduplicated_records.append(record)
         
-        return all_records
+        # Final sort by date and apply limit
+        deduplicated_records.sort(key=lambda x: x.date, reverse=(sort_order == -1))
+        if limit:
+            deduplicated_records = deduplicated_records[:limit]
+        
+        logger.info(f"📊 Retrieved {len(all_records)} records, after deduplication: {len(deduplicated_records)}")
+        return deduplicated_records
     
+    async def get_price_data_count(
+        self,
+        symbol: str = None,
+        scrip_code: int = None,
+        start_date: datetime = None,
+        end_date: datetime = None
+    ) -> int:
+        """Get count of price data records with filters"""
+        if not symbol and not scrip_code:
+            raise ValueError("Either symbol or scrip_code must be provided")
+        
+        # Build query
+        query = {}
+        if symbol:
+            query["symbol"] = symbol
+        if scrip_code:
+            query["scrip_code"] = scrip_code
+        if start_date or end_date:
+            date_query = {}
+            if start_date:
+                date_query["$gte"] = start_date
+            if end_date:
+                date_query["$lte"] = end_date
+            query["date"] = date_query
+        
+        # Get all price collections and count records
+        collections = await self.get_all_price_collections()
+        
+        total_count = 0
+        for collection_name in collections:
+            try:
+                collection = self.db[collection_name]
+                count = await collection.count_documents(query)
+                total_count += count
+            except Exception as e:
+                logger.warning(f"⚠️ Error counting partition {collection_name}: {e}")
+                continue
+        
+        return total_count
+
     async def refresh_symbol_mappings_from_index_meta(self) -> Dict[str, int]:
         """Refresh symbol mappings by fetching data from index_meta collection"""
         logger.info("🔄 Refreshing symbol mappings from index_meta...")
@@ -393,208 +405,226 @@ class StockDataManager:
         # Create mappings
         mappings = self.nse_client.match_symbols_with_masters(symbols, masters)
         
-        # Store mappings
-        result = await self.store_symbol_mappings(mappings)
+        # Calculate statistics
+        total_symbols = len(symbols)
+        unique_symbols = len(mappings)
+        mapped_symbols = len([m for m in mappings if m.nse_scrip_code is not None])
+        unmapped_symbols = unique_symbols - mapped_symbols
         
-        return result
+        # Store mappings
+        storage_result = await self.store_symbol_mappings(mappings)
+        
+        # Return comprehensive statistics
+        return {
+            "total_symbols": total_symbols,
+            "unique_symbols": unique_symbols,
+            "mapped_symbols": mapped_symbols,
+            "unmapped_symbols": unmapped_symbols,
+            "new_mappings": storage_result.get("inserted", 0),
+            "updated_mappings": storage_result.get("updated", 0),
+            "storage_errors": storage_result.get("errors", 0)
+        }
     
-    async def _get_earliest_missing_year(self, symbol: str) -> int:
-        """Find the earliest year with missing data for smart loading"""
-        try:
-            # Start from 2005 (our earliest data year)
-            current_year = datetime.now().year
+    async def analyze_data_gaps_after_download(self, symbol: str, downloaded_data: List[PriceData], force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Analyze gaps between downloaded NSE data and existing DB data
+        This is the correct approach: download first, then compare with DB
+        
+        Args:
+            symbol: Stock symbol
+            downloaded_data: Fresh data downloaded from NSE (source of truth)
             
-            for year in range(2005, current_year + 1):
-                # Check if we have any data for this year
-                year_start = datetime(year, 1, 1)
-                year_end = datetime(year, 12, 31)
-                
-                existing_data = await self.get_price_data(
-                    symbol=symbol,
-                    start_date=year_start,
-                    end_date=year_end,
-                    limit=1  # Just check if any data exists
-                )
-                
-                if not existing_data:
-                    # Found the first year with no data
-                    logger.info(f"📊 Earliest missing year for {symbol}: {year}")
-                    return year
-            
-            # If we reach here, all years have some data, check for gaps in current year
-            logger.info(f"📊 All years have data for {symbol}, checking current year gaps")
-            return current_year
-            
-        except Exception as e:
-            logger.error(f"Error finding earliest missing year for {symbol}: {e}")
-            return 2005  # Default fallback
-    
-    async def _delete_symbol_data(self, symbol: str, start_date: datetime, end_date: datetime):
-        """Delete existing data for a symbol in the given date range"""
-        try:
-            # Get year range for partitioned collections
-            start_year = start_date.year
-            end_year = end_date.year
-            
-            deleted_count = 0
-            
-            for year in range(start_year, end_year + 1):
-                collection_name = self._get_partition_collection_name(year)
-                collection = self.db[collection_name]
-                
-                # Delete data for this symbol in this year
-                result = await collection.delete_many({
-                    "symbol": symbol,
-                    "date": {
-                        "$gte": datetime(year, 1, 1),
-                        "$lte": datetime(year, 12, 31)
-                    }
-                })
-                
-                deleted_count += result.deleted_count
-                
-            logger.info(f"🗑️ Deleted {deleted_count} existing records for {symbol}")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"Error deleting data for {symbol}: {e}")
-            return 0
-    
+        Returns:
+            Gap analysis with recommendations for data processing
+        """
+        if not downloaded_data:
+            return {
+                "status": "no_data",
+                "action": "skip",
+                "message": "No data available from NSE",
+                "insert_count": 0,
+                "update_count": 0
+            }
+        
+        # Get date range from downloaded data (source of truth)
+        downloaded_dates = {data.date.date() for data in downloaded_data}
+        min_downloaded_date = min(downloaded_dates)
+        max_downloaded_date = max(downloaded_dates)
+        
+        logger.info(f"📊 Analyzing data gaps for {symbol}")
+        logger.info(f"   Downloaded from NSE: {len(downloaded_data)} trading days ({min_downloaded_date} to {max_downloaded_date})")
+
+        # Get existing data from DB for the same date range
+        existing_data = await self.get_price_data(
+            symbol=symbol,
+            start_date=datetime.combine(min_downloaded_date, datetime.min.time()),
+            end_date=datetime.combine(max_downloaded_date, datetime.max.time())
+        )
+
+        existing_dates = {data.date.date() for data in existing_data}
+        logger.info(f"   Existing in DB: {len(existing_dates)} unique trading days (from {len(existing_data)} total records)")        # Compare NSE data (source of truth) with DB data
+        missing_in_db = downloaded_dates - existing_dates  # Dates in NSE but not in DB (need INSERT)
+        existing_in_db = downloaded_dates & existing_dates  # Dates in both (need UPDATE)
+        extra_in_db = existing_dates - downloaded_dates     # Dates in DB but not in NSE (data validation issue)
+        
+        # Count operations needed
+        insert_count = len(missing_in_db)
+        update_count = len(existing_in_db)
+        extra_count = len(extra_in_db)
+        
+        # Determine action and message based on data analysis and force_refresh
+        if insert_count == len(downloaded_data):
+            # All downloaded data is new
+            action = "insert_all"
+            message = f"All {len(downloaded_data)} trading days are new - will insert all"
+        elif insert_count > 0 and update_count > 0:
+            # Mixed: some new, some existing
+            action = "insert_and_update" 
+            message = f"Mixed data: {insert_count} new trading days to insert, {update_count} existing to update"
+        elif update_count == len(downloaded_data):
+            # All data exists - check if we should update or skip
+            if force_refresh:
+                action = "update_all"
+                message = f"All {len(downloaded_data)} trading days exist - will force update all"
+            else:
+                action = "skip_all"
+                message = f"All {len(downloaded_data)} trading days exist and current - will skip"
+        else:
+            # Should not happen, but handle gracefully
+            action = "process"
+            message = f"Processing {len(downloaded_data)} trading days"
+        
+        # Log extra data warning if any
+        if extra_count > 0:
+            logger.warning(f"⚠️ Found {extra_count} dates in DB that NSE doesn't have - possible data cleanup needed")
+        
+        # Calculate coverage and freshness
+        coverage_percentage = (len(existing_dates) / len(downloaded_dates) * 100) if downloaded_dates else 0
+        days_behind = (datetime.now().date() - max_downloaded_date).days if downloaded_dates else 999
+        
+        return {
+            "status": "analyzed",
+            "action": action,
+            "message": message,
+            "statistics": {
+                "total_downloaded": len(downloaded_data),
+                "total_existing": len(existing_data),
+                "insert_count": insert_count,
+                "update_count": update_count,
+                "extra_in_db": extra_count,
+                "coverage_percentage": coverage_percentage,
+                "date_range": f"{min_downloaded_date} to {max_downloaded_date}",
+                "days_behind": days_behind,
+                "data_freshness": "current" if days_behind <= 1 else f"{days_behind} days old"
+            },
+            "insert_count": insert_count,
+            "update_count": update_count,
+            "missing_dates_sample": sorted(list(missing_in_db))[:10] if missing_in_db else [],
+            "extra_dates_sample": sorted(list(extra_in_db))[:10] if extra_in_db else []
+        }
+
     async def download_historical_data_for_symbol(
         self,
         symbol: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False,
-        smart_load: bool = False
+        force_refresh: bool = False
     ) -> Dict[str, Any]:
-        """Download historical data for a single symbol"""
-        
-        processing_start_time = datetime.now()
+        """Download historical data for a single symbol with intelligent gap analysis"""
         
         # Get symbol mapping
         mappings = await self.get_symbol_mappings([symbol], mapped_only=True)
         if not mappings:
             return {"error": f"No NSE mapping found for symbol {symbol}"}
-        
+
         mapping = mappings[0]
         scrip_code = mapping.nse_scrip_code
-        
+
         logger.info(f"📈 Downloading historical data for {symbol} (scrip: {scrip_code})")
-        
-        # Handle smart_load: find earliest missing year and start from there
-        if smart_load:
-            earliest_missing_year = await self._get_earliest_missing_year(symbol)
-            smart_start_date = datetime(earliest_missing_year, 1, 1)
-            
-            if smart_start_date > start_date:
-                start_date = smart_start_date
-                logger.info(f"🎯 Smart load: Starting from earliest missing year {earliest_missing_year}")
-        
-        # Set default date range if not provided
+
+        # Set default date range
         if not start_date:
             start_date = datetime(2005, 1, 1)
         if not end_date:
             end_date = datetime.now()
-        
-        # For refresh mode: delete existing data first
-        if force_refresh:
-            logger.info(f"🔄 Refresh mode: Deleting existing data for {symbol}")
-            await self._delete_symbol_data(symbol, start_date, end_date)
-        
-        # Check if we already have recent data (unless force refresh)
-        elif not force_refresh:
-            # For sync mode, check for gaps in the requested range
+
+        # Simple recent data check for non-force refresh (keep existing logic for now)
+        if not force_refresh:
             existing_data = await self.get_price_data(
                 symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                limit=None  # Get all data to check for gaps
+                start_date=end_date - timedelta(days=7),  # Check last week
+                limit=1
             )
-            
             if existing_data:
-                # Check if we have complete data using intelligent gap detection
-                existing_dates = {record.date.date() for record in existing_data}
-                
-                # Use existing data coverage to determine if we have comprehensive data
-                # If we have good coverage (>95%), trust that we have complete data
-                business_days = self._generate_business_days(start_date, end_date)
-                coverage_ratio = len(existing_dates) / len(business_days) if business_days else 0
-                
-                # Indian stock market typically has ~85-90% of business days as trading days
-                # If we have >95% of business days, consider data complete
-                if coverage_ratio >= 0.85:
-                    logger.info(f"✅ Comprehensive data exists for {symbol} ({coverage_ratio:.2%} coverage)")
-                    return {
-                        "message": f"Comprehensive data exists for {symbol} ({coverage_ratio:.2%} coverage)", 
-                        "date_range": f"{start_date.date()} to {end_date.date()}",
-                        "total_records": len(existing_data)
-                    }
-                else:
-                    # Low coverage, need to download more data
-                    logger.info(f"📊 Low coverage ({coverage_ratio:.2%}) for {symbol}, proceeding with download")
-            else:
-                logger.info(f"📊 No existing data for {symbol}, downloading full range")
-        
-        # Download from NSE
+                last_date = existing_data[0].date
+                logger.info(f"ℹ️ Latest data for {symbol}: {last_date.date()}")
+                if (datetime.now() - last_date).days < 2:  # Data is recent
+                    return {"message": f"Recent data exists for {symbol}", "last_date": last_date}
+
+        # Download from NSE (source of truth)
         historical_data = await self.nse_client.fetch_historical_data(
             scrip_code=scrip_code,
             symbol=symbol,
             start_date=start_date,
             end_date=end_date
         )
-        
+
         if not historical_data:
             return {"error": f"No historical data fetched for {symbol}"}
+
+        # Perform gap analysis with downloaded data
+        gap_analysis = await self.analyze_data_gaps_after_download(symbol, historical_data, force_refresh)
         
-        # Store in database
-        storage_result = await self.store_price_data(historical_data)
+        logger.info(f"📊 Gap Analysis: {gap_analysis['message']}")
+        if gap_analysis.get('statistics'):
+            stats = gap_analysis['statistics']
+            logger.info(f"   📅 Trading Days Analysis:")
+            logger.info(f"      New days to insert: {stats['insert_count']}")
+            logger.info(f"      Existing days to update: {stats['update_count']}")
+            logger.info(f"      Coverage: {stats['coverage_percentage']:.1f}% of trading days")
+
+        # Check if we should skip processing based on gap analysis action
+        should_skip = (gap_analysis.get('action') == 'skip_all')
         
-        # Update metadata
-        await self._update_stock_metadata(symbol, scrip_code, len(historical_data))
-        
+        if should_skip:
+            logger.info(f"✅ Skipping storage: All {len(historical_data)} trading days already exist in database")
+            storage_result = {"inserted": 0, "updated": 0, "errors": 0, "skipped": len(historical_data)}
+        else:
+            # Store in database (this handles inserts and updates automatically)
+            storage_result = await self.store_price_data(historical_data)
+
+        # Update metadata only if we processed data
+        if not should_skip:
+            await self._update_stock_metadata(symbol, scrip_code, len(historical_data))
+
         # Log processing
+        processing_status = "skipped" if should_skip else "success"
+        records_processed = 0 if should_skip else len(historical_data)
+        
         await self._log_processing_activity(
             symbol=symbol,
             scrip_code=scrip_code,
-            status="success",
-            records_processed=len(historical_data),
+            status=processing_status,
+            records_processed=records_processed,
             start_date=start_date,
             end_date=end_date
         )
-        
-        
-        processing_time = (datetime.now() - processing_start_time).total_seconds()
-        
-        # Calculate skipped records correctly
-        records_fetched = len(historical_data)
-        records_added = storage_result.get("inserted", 0)
-        records_updated = storage_result.get("updated", 0)
-        records_errors = storage_result.get("errors", 0)
-        records_skipped = records_fetched - records_added - records_updated - records_errors
-        
+
         return {
             "symbol": symbol,
             "scrip_code": scrip_code,
-            "records_fetched": records_fetched,
-            "records_added": records_added,
-            "records_updated": records_updated,
-            "records_skipped": records_skipped,
-            "records_errors": records_errors,
-            "total_records": records_added + records_updated,
+            "records_fetched": len(historical_data),
             "storage_result": storage_result,
-            "start_date": start_date.date().isoformat() if start_date else None,
-            "end_date": end_date.date().isoformat() if end_date else None,
-            "processing_time": f"{processing_time:.2f}s"
+            "gap_analysis": gap_analysis,
+            "date_range": f"{start_date.date()} to {end_date.date()}"
         }
-    
+
     async def download_historical_data_for_index(
         self,
         index_name: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False,
-        smart_load: bool = False
+        force_refresh: bool = False
     ) -> Dict[str, Any]:
         """Download historical data for all symbols in an index"""
         
@@ -615,8 +645,7 @@ class StockDataManager:
                     symbol=mapping.symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    force_refresh=force_refresh,
-                    smart_load=smart_load
+                    force_refresh=force_refresh
                 )
                 results.append(result)
                 
@@ -642,8 +671,7 @@ class StockDataManager:
         industry_name: str,
         start_date: datetime = None,
         end_date: datetime = None,
-        force_refresh: bool = False,
-        smart_load: bool = False
+        force_refresh: bool = False
     ) -> Dict[str, Any]:
         """Download historical data for all symbols in an industry"""
         
@@ -664,8 +692,7 @@ class StockDataManager:
                     symbol=mapping.symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    force_refresh=force_refresh,
-                    smart_load=smart_load
+                    force_refresh=force_refresh
                 )
                 results.append(result)
                 
@@ -730,6 +757,88 @@ class StockDataManager:
         
         await collection.insert_one(log_entry)
     
+    async def delete_price_data_for_symbol(self, symbol: str) -> Dict[str, Any]:
+        """
+        Delete all price data for a specific symbol from all partitions
+        Useful for testing and data cleanup
+        
+        Args:
+            symbol: Stock symbol to delete
+            
+        Returns:
+            Dictionary with deletion results
+        """
+        logger.info(f"🗑️ Deleting all price data for symbol: {symbol}")
+        
+        total_deleted = 0
+        partitions_affected = []
+        errors = []
+        
+        # Get all price collections (partitions)
+        try:
+            collections = await self.db.list_collection_names()
+            price_collections = [c for c in collections if c.startswith('prices_')]
+            
+            logger.info(f"   Checking {len(price_collections)} partitions...")
+            
+            for collection_name in price_collections:
+                try:
+                    collection = self.db[collection_name]
+                    
+                    # Check how many records exist for this symbol
+                    count_before = await collection.count_documents({'symbol': symbol})
+                    
+                    if count_before > 0:
+                        # Delete all records for this symbol
+                        delete_result = await collection.delete_many({'symbol': symbol})
+                        deleted_count = delete_result.deleted_count
+                        
+                        if deleted_count > 0:
+                            total_deleted += deleted_count
+                            partitions_affected.append({
+                                'partition': collection_name,
+                                'deleted': deleted_count
+                            })
+                            logger.info(f"   ✅ Deleted {deleted_count} records from {collection_name}")
+                        
+                except Exception as e:
+                    error_msg = f"Error deleting from {collection_name}: {str(e)}"
+                    errors.append(error_msg)
+                    logger.error(f"   ❌ {error_msg}")
+            
+            # Also clean up metadata if any
+            try:
+                metadata_deleted = await self.db.stock_metadata.delete_many({'symbol': symbol})
+                if metadata_deleted.deleted_count > 0:
+                    logger.info(f"   🗑️ Deleted metadata for {symbol}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Could not delete metadata: {e}")
+            
+            # Log summary
+            if total_deleted > 0:
+                logger.info(f"✅ Successfully deleted {total_deleted} total records for {symbol} from {len(partitions_affected)} partitions")
+            else:
+                logger.info(f"ℹ️ No records found for {symbol} in any partition")
+            
+            return {
+                'symbol': symbol,
+                'total_deleted': total_deleted,
+                'partitions_affected': partitions_affected,
+                'errors': errors,
+                'success': len(errors) == 0
+            }
+            
+        except Exception as e:
+            error_msg = f"Failed to delete data for {symbol}: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            return {
+                'symbol': symbol,
+                'total_deleted': 0,
+                'partitions_affected': [],
+                'errors': [error_msg],
+                'success': False
+            }
+
     async def get_data_statistics(self) -> Dict[str, Any]:
         """Get statistics about stored price data"""
         stats = {
@@ -774,811 +883,6 @@ class StockDataManager:
         
         return stats
 
-    async def get_index_symbols(self, index_name: str) -> List[str]:
-        """Get all symbols for a given index"""
-        try:
-            mappings = await self.get_symbol_mappings()
-            index_symbols = [
-                mapping.symbol for mapping in mappings 
-                if index_name in mapping.index_names
-            ]
-            return index_symbols
-        except Exception as e:
-            logger.error(f"Error getting index symbols for {index_name}: {e}")
-            return []
-
-    async def get_industry_symbols(self, industry_name: str) -> List[str]:
-        """Get all symbols for a given industry"""
-        try:
-            mappings = await self.get_symbol_mappings()
-            industry_symbols = [
-                mapping.symbol for mapping in mappings 
-                if mapping.industry == industry_name
-            ]
-            return industry_symbols
-        except Exception as e:
-            logger.error(f"Error getting industry symbols for {industry_name}: {e}")
-            return []
-
-    async def analyze_data_gaps(
-        self,
-        symbol: str,
-        start_date: datetime,
-        end_date: datetime,
-        auto_download: bool = True,
-        full_historical_analysis: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Analyze data gaps for a symbol within a date range
-        
-        Args:
-            symbol: Stock symbol to analyze
-            start_date: Start date for analysis (ignored if full_historical_analysis=True)
-            end_date: End date for analysis (ignored if full_historical_analysis=True)
-            auto_download: Whether to attempt downloading missing data first
-            full_historical_analysis: If True, discovers and analyzes the complete NSE historical range for this symbol
-        
-        Returns:
-            Dict containing gap analysis with missing dates, total gaps, etc.
-        """
-        try:
-            # For complete historical analysis, discover the full NSE range for this symbol
-            if full_historical_analysis:
-                logger.info(f"🔍 COMPLETE HISTORICAL ANALYSIS for {symbol}: Discovering full NSE range...")
-                
-                # Get symbol mapping
-                mappings = await self.get_symbol_mappings([symbol], mapped_only=True)
-                if not mappings:
-                    return {"error": f"No NSE mapping found for symbol {symbol}"}
-                
-                mapping = mappings[0]
-                scrip_code = mapping.nse_scrip_code
-                
-                # Discover the complete NSE historical range for this symbol
-                # Start from a very early date and fetch recent data to determine actual range
-                discovery_start = datetime(2000, 1, 1)  # Start early for discovery
-                discovery_end = datetime.now()
-                
-                logger.info(f"📡 Fetching sample NSE data to discover {symbol}'s complete trading history...")
-                
-                try:
-                    # Fetch a broad sample to determine actual NSE range
-                    sample_data = await self.nse_client.fetch_historical_data(
-                        scrip_code=scrip_code,
-                        symbol=symbol,
-                        start_date=discovery_start,
-                        end_date=discovery_end
-                    )
-                    
-                    if not sample_data:
-                        return {
-                            "total_expected_days": 0,
-                            "total_actual_days": 0,
-                            "total_missing_days": 0,
-                            "gap_percentage": 0.0,
-                            "has_data": False,
-                            "message": f"No NSE historical data found for {symbol}",
-                            "full_historical_analysis": True,
-                            "nse_discovery_attempted": True
-                        }
-                    
-                    # Determine the actual NSE historical range
-                    nse_dates = [record.date.date() for record in sample_data]
-                    nse_start_date = min(nse_dates)
-                    nse_end_date = max(nse_dates)
-                    
-                    # Override analysis dates with discovered NSE range
-                    start_date = datetime.combine(nse_start_date, datetime.min.time())
-                    end_date = datetime.combine(nse_end_date, datetime.min.time())
-                    
-                    logger.info(f"✅ Discovered {symbol}'s complete NSE range: {nse_start_date} to {nse_end_date} ({len(sample_data)} sample records)")
-                    logger.info(f"📊 Now analyzing gaps across {symbol}'s COMPLETE {(nse_end_date - nse_start_date).days} day history...")
-                    
-                except Exception as e:
-                    logger.error(f"❌ Failed to discover NSE range for {symbol}: {e}")
-                    return {
-                        "error": f"Failed to discover NSE historical range for {symbol}: {str(e)}",
-                        "full_historical_analysis": True,
-                        "nse_discovery_attempted": True
-                    }
-            # Get existing data for the symbol
-            existing_data = await self.get_price_data(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                limit=None  # Get all records
-            )
-            
-            # Check if we have very little data and should download first
-            total_expected_trading_days = self._estimate_trading_days(start_date, end_date)
-            existing_count = len(existing_data) if existing_data else 0
-            
-            # If we have less than 10% of expected trading data, try to download first
-            should_download = (
-                auto_download and 
-                (existing_count == 0 or existing_count < (total_expected_trading_days * 0.1))
-            )
-            
-            if should_download:
-                logger.info(f"Gap analysis for {symbol}: Only {existing_count} records exist out of {total_expected_trading_days} expected. Downloading data first...")
-                
-                # Attempt to download data for this symbol
-                try:
-                    download_result = await self.download_historical_data_for_symbol(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        force_refresh=False  # Don't refresh existing data, just fill gaps
-                    )
-                    
-                    # Get data again after download
-                    existing_data = await self.get_price_data(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=None
-                    )
-                    logger.info(f"After download attempt: {len(existing_data) if existing_data else 0} records for {symbol}")
-                    
-                    # If download shows NSE API returned no data, symbol might not trade in this period
-                    if isinstance(download_result, dict) and download_result.get("records_fetched", 0) == 0:
-                        logger.info(f"NSE returned no data for {symbol} in period {start_date.date()} to {end_date.date()} - symbol may not have been trading")
-                        # If no data was fetched from NSE, this symbol wasn't trading in this period
-                        return {
-                            "total_expected_days": 0,
-                            "total_actual_days": 0,
-                            "total_missing_days": 0,
-                            "gap_percentage": 0.0,
-                            "has_data": False,
-                            "date_range": {
-                                "start": start_date.date().isoformat(),
-                                "end": end_date.date().isoformat()
-                            },
-                            "gaps": [],
-                            "download_attempted": True,
-                            "yearly_breakdown": [],
-                            "message": f"Symbol {symbol} was not trading in the requested period {start_date.date()} to {end_date.date()}",
-                            "nse_data_available": False
-                        }
-                    
-                except Exception as download_error:
-                    logger.warning(f"Failed to download data for {symbol}: {download_error}")
-                    # Continue with gap analysis using existing data
-            
-            if not existing_data:
-                # No data exists at all (even after download attempt)
-                return {
-                    "total_expected_days": 0,
-                    "total_actual_days": 0,
-                    "total_missing_days": 0,
-                    "gap_percentage": 0.0,
-                    "has_data": False,
-                    "date_range": {
-                        "start": start_date.date().isoformat(),
-                        "end": end_date.date().isoformat()
-                    },
-                    "gaps": [],
-                    "download_attempted": should_download,
-                    "yearly_breakdown": [],
-                    "message": f"No data available for {symbol} in the requested period. Symbol may not have been trading during this time.",
-                    "actual_trading_period": None
-                }
-            
-            # Convert to date set for easier processing
-            existing_dates = {record.date.date() for record in existing_data}
-            
-            # Key Fix: Determine the actual NSE trading period for this symbol
-            # We need to understand what period NSE actually has data for, not just what we have in DB
-            logger.info(f"🔍 Determining actual NSE trading period for {symbol}...")
-            
-            # Try to get a broader range of data from NSE to understand the true trading period
-            nse_data_check = await self._get_nse_trading_period(symbol, start_date, end_date)
-            
-            if nse_data_check and nse_data_check.get("has_data"):
-                # Use NSE's actual trading period
-                actual_start_date = nse_data_check["start_date"]
-                actual_end_date = nse_data_check["end_date"]
-                logger.info(f"📅 NSE trading period for {symbol}: {actual_start_date} to {actual_end_date}")
-            else:
-                # Fallback: use existing data range if NSE check fails
-                if existing_dates:
-                    actual_start_date = min(existing_dates)
-                    actual_end_date = max(existing_dates)
-                    logger.info(f"📅 Using existing data range for {symbol}: {actual_start_date} to {actual_end_date}")
-                else:
-                    # No data available anywhere
-                    return {
-                        "total_expected_days": 0,
-                        "total_actual_days": 0,
-                        "total_missing_days": 0,
-                        "gap_percentage": 0.0,
-                        "has_data": False,
-                        "date_range": {
-                            "start": start_date.date().isoformat(),
-                            "end": end_date.date().isoformat()
-                        },
-                        "gaps": [],
-                        "yearly_breakdown": [],
-                        "message": f"No NSE data available for {symbol} in any period",
-                        "actual_trading_period": None
-                    }
-            
-            # Key Fix: Only analyze the period where the symbol actually has data
-            # Don't try to analyze periods before the symbol started trading
-            analysis_start = actual_start_date
-            analysis_end = actual_end_date
-            
-            # If user requested a more recent period, respect that
-            if start_date.date() > actual_start_date:
-                analysis_start = start_date.date()
-            if end_date.date() < actual_end_date:
-                analysis_end = end_date.date()
-            
-            # If the adjusted period is invalid
-            if analysis_start > analysis_end:
-                return {
-                    "total_expected_days": 0,
-                    "total_actual_days": 0,
-                    "total_missing_days": 0,
-                    "gap_percentage": 0.0,
-                    "has_data": True,
-                    "date_range": {
-                        "start": start_date.date().isoformat(),
-                        "end": end_date.date().isoformat()
-                    },
-                    "actual_trading_period": {
-                        "start": actual_start_date.isoformat(),
-                        "end": actual_end_date.isoformat()
-                    },
-                    "gaps": [],
-                    "yearly_breakdown": [],
-                    "message": f"No overlap between requested period and actual trading period. Actual trading: {actual_start_date} to {actual_end_date}",
-                    "calendar_method": "symbol_specific"
-                }
-            
-            # Get real trading calendar only for the actual trading period
-            logger.info(f"📅 Analyzing gaps for {symbol} from {analysis_start} to {analysis_end} (actual trading period)")
-            
-            # Strategy: Use the symbol's own data pattern to identify legitimate trading days
-            # If we have substantial data coverage (>80%), trust the symbol's data pattern
-            analysis_start_dt = datetime.combine(analysis_start, datetime.min.time())
-            analysis_end_dt = datetime.combine(analysis_end, datetime.min.time())
-            
-            # Calculate expected trading days in the ACTUAL trading period only
-            estimated_trading_days = self._estimate_trading_days(analysis_start_dt, analysis_end_dt)
-            existing_count = len([d for d in existing_dates if analysis_start <= d <= analysis_end])
-            coverage_ratio = existing_count / estimated_trading_days if estimated_trading_days > 0 else 0
-            
-            logger.info(f"📊 {symbol} has {existing_count} records out of {estimated_trading_days} estimated trading days ({coverage_ratio:.2%} coverage)")
-            
-            # If we have >95% of estimated trading days, consider data comprehensive
-            if coverage_ratio >= 0.95:  
-                # Use symbol's own data - we have comprehensive coverage
-                real_trading_days = sorted(list(existing_dates))
-                logger.info(f"📈 Using {symbol}'s own data pattern (excellent coverage: {coverage_ratio:.2%})")
-                
-                # For excellent coverage, report minimal gaps
-                total_expected = len(real_trading_days)
-                total_actual = len(existing_dates)
-                total_missing = 0  # Consider data complete
-                gap_percentage = 0.0
-                missing_dates = []
-                
-            elif coverage_ratio >= 0.85:
-                # Good coverage - use symbol's own data pattern
-                real_trading_days = sorted(list(existing_dates))
-                logger.info(f"📈 Using {symbol}'s own data pattern (good coverage: {coverage_ratio:.2%})")
-                
-                # Calculate minimal gaps for display only
-                business_days = self._count_business_days(analysis_start_dt, analysis_end_dt)
-                expected_trading_days = []
-                current = analysis_start_dt
-                while current.date() <= analysis_end:
-                    if current.weekday() < 5:  # Monday = 0, Friday = 4
-                        expected_trading_days.append(current.date())
-                    current += timedelta(days=1)
-                
-                # Find actual missing dates (but these are likely holidays)
-                missing_dates = [day for day in expected_trading_days if day not in existing_dates]
-                total_expected = estimated_trading_days
-                total_actual = len(existing_dates)
-                total_missing = max(0, total_expected - total_actual)  # Use realistic expectation
-                gap_percentage = (total_missing / total_expected * 100) if total_expected > 0 else 0
-            else:
-                # Low coverage - need more data, but still use realistic expectations
-                logger.info(f"⚠️ Low coverage ({coverage_ratio:.2%}): Analyzing with estimated trading calendar")
-                
-                # Use estimated trading days as baseline
-                total_expected = estimated_trading_days
-                total_actual = existing_count
-                total_missing = max(0, total_expected - total_actual)
-                gap_percentage = (total_missing / total_expected * 100) if total_expected > 0 else 0
-                missing_dates = []  # Don't calculate specific dates for low coverage
-            
-            # Group consecutive missing dates into gaps (only if we have missing dates)
-            gaps = self._group_consecutive_dates(missing_dates) if missing_dates else []
-            
-            # Yearly breakdown
-            yearly_breakdown = self._analyze_yearly_gaps(real_trading_days, existing_dates)
-            
-            logger.info(f"📊 Final gap analysis for {symbol}: {total_actual}/{total_expected} days ({gap_percentage:.2f}% gaps)")
-            
-            return {
-                "total_expected_days": total_expected,
-                "total_actual_days": total_actual,
-                "total_missing_days": total_missing,
-                "gap_percentage": round(gap_percentage, 2),
-                "has_data": total_actual > 0,
-                "date_range": {
-                    "start": start_date.date().isoformat(),
-                    "end": end_date.date().isoformat()
-                },
-                "actual_trading_period": {
-                    "start": actual_start_date.isoformat(),
-                    "end": actual_end_date.isoformat()
-                },
-                "analysis_period": {
-                    "start": analysis_start.isoformat(),
-                    "end": analysis_end.isoformat()
-                },
-                "gaps": [{"start": gap[0].isoformat(), "end": gap[-1].isoformat(), "days": len(gap)} for gap in gaps],
-                "yearly_breakdown": yearly_breakdown,
-                "calendar_method": "high_coverage_trust" if coverage_ratio >= 0.80 else "multi_symbol_reference",
-                "coverage_ratio": round(coverage_ratio, 4),
-                "calendar_symbols_analyzed": 1 if coverage_ratio >= 0.80 else len(await self._get_symbols_for_calendar_analysis(analysis_start_dt, analysis_end_dt)),
-                "message": f"Trusted {symbol}'s data completeness (coverage: {coverage_ratio:.2%})" if coverage_ratio >= 0.80 else f"Low coverage analysis for {symbol}"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing gaps for {symbol}: {e}")
-            return {"error": str(e)}
-    
-    async def _get_nse_trading_period(self, symbol: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
-        """
-        Check NSE to determine the actual trading period for a symbol
-        This helps us understand when the symbol was actually available for trading
-        """
-        try:
-            # Get symbol mapping
-            mappings = await self.get_symbol_mappings([symbol], mapped_only=True)
-            if not mappings:
-                logger.warning(f"No NSE mapping found for {symbol}")
-                return {"has_data": False}
-            
-            mapping = mappings[0]
-            scrip_code = mapping.nse_scrip_code
-            
-            # Try to fetch a small sample of data to check availability
-            # Start with the requested period, but extend if needed
-            test_start = start_date
-            test_end = end_date
-            
-            logger.info(f"🔍 Checking NSE data availability for {symbol} (scrip: {scrip_code})")
-            
-            # Try to fetch data for the requested period
-            historical_data = await self.nse_client.fetch_historical_data(
-                scrip_code=scrip_code,
-                symbol=symbol,
-                start_date=test_start,
-                end_date=test_end
-            )
-            
-            if not historical_data:
-                # No data in requested period, symbol might not be trading in this period
-                logger.info(f"No NSE data found for {symbol} in period {test_start.date()} to {test_end.date()}")
-                return {"has_data": False}
-            
-            # Found data - determine the actual range
-            nse_dates = [record.date.date() for record in historical_data]
-            nse_start = min(nse_dates)
-            nse_end = max(nse_dates)
-            
-            logger.info(f"📊 NSE has data for {symbol} from {nse_start} to {nse_end} ({len(historical_data)} records)")
-            
-            return {
-                "has_data": True,
-                "start_date": nse_start,
-                "end_date": nse_end,
-                "sample_records": len(historical_data)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking NSE trading period for {symbol}: {e}")
-            return {"has_data": False}
-
-    def _count_business_days(self, start_date: datetime, end_date: datetime) -> int:
-        """Count business days between two dates"""
-        from datetime import timedelta
-        current = start_date.date()
-        end = end_date.date()
-        count = 0
-        while current <= end:
-            if current.weekday() < 5:  # Monday = 0, Friday = 4
-                count += 1
-            current += timedelta(days=1)
-        return count
-    
-    def _estimate_trading_days(self, start_date: datetime, end_date: datetime) -> int:
-        """
-        Estimate actual trading days for Indian stock market
-        Indian market typically has ~15-20 holidays per year (85-90% of business days)
-        """
-        business_days = self._count_business_days(start_date, end_date)
-        
-        # Calculate years in the range
-        years = (end_date.year - start_date.year) + 1
-        
-        # Estimate holidays: ~17 holidays per year on average
-        estimated_holidays = years * 17
-        
-        # Trading days = business days - holidays
-        estimated_trading_days = max(0, business_days - estimated_holidays)
-        
-        return estimated_trading_days
-    
-    async def _get_supplementary_trading_calendar(
-        self, 
-        start_date: datetime, 
-        end_date: datetime, 
-        primary_symbol: str,
-        primary_symbol_dates: set
-    ) -> List[datetime.date]:
-        """
-        Get supplementary trading calendar from other symbols to enhance gap detection.
-        Only includes dates that are business days and reasonable for the primary symbol.
-        
-        Args:
-            start_date: Start date for calendar extraction
-            end_date: End date for calendar extraction
-            primary_symbol: The symbol we're analyzing
-            primary_symbol_dates: Set of dates where primary symbol has data
-            
-        Returns:
-            List of additional trading dates based on other symbols
-        """
-        try:
-            # Get a few reliable symbols for calendar reference
-            symbols_for_analysis = await self._get_symbols_for_calendar_analysis(start_date, end_date)
-            
-            if len(symbols_for_analysis) < 2:
-                logger.warning("Insufficient symbols for supplementary calendar")
-                return []
-            
-            # Use top 3 symbols (excluding primary symbol) for supplementary calendar
-            reference_symbols = [s for s in symbols_for_analysis[:5] if s != primary_symbol][:3]
-            
-            if not reference_symbols:
-                return []
-            
-            # Collect dates from reference symbols
-            supplementary_dates = set()
-            
-            for symbol in reference_symbols:
-                try:
-                    symbol_data = await self.get_price_data(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=None
-                    )
-                    
-                    for record in symbol_data:
-                        trading_date = record.date.date()
-                        # Only include business days that fall within a reasonable range
-                        if (trading_date.weekday() < 5 and 
-                            start_date.date() <= trading_date <= end_date.date()):
-                            supplementary_dates.add(trading_date)
-                            
-                except Exception as e:
-                    logger.warning(f"Could not analyze {symbol} for supplementary calendar: {e}")
-                    continue
-            
-            # Return only dates that are not already in primary symbol's data
-            # These represent potential missing trading days
-            additional_dates = [date for date in supplementary_dates if date not in primary_symbol_dates]
-            
-            logger.info(f"📊 Supplementary calendar: found {len(additional_dates)} additional potential trading days")
-            
-            return sorted(additional_dates)
-            
-        except Exception as e:
-            logger.error(f"Error getting supplementary trading calendar: {e}")
-            return []
-
-    async def _get_real_trading_calendar(self, start_date: datetime, end_date: datetime, min_symbols: int = 5) -> List[datetime.date]:
-        """
-        Extract real trading calendar by analyzing actual trading data from multiple symbols.
-        This is more accurate than guessing holidays.
-        
-        Args:
-            start_date: Start date for calendar extraction
-            end_date: End date for calendar extraction  
-            min_symbols: Minimum number of symbols that must have data for a date to be considered a trading day
-            
-        Returns:
-            List of actual trading dates based on real market data
-        """
-        try:
-            logger.info(f"📅 Extracting real trading calendar from {start_date.date()} to {end_date.date()}")
-            
-            # Get symbols with good data coverage for analysis
-            symbols_for_analysis = await self._get_symbols_for_calendar_analysis(start_date, end_date)
-            
-            if len(symbols_for_analysis) < min_symbols:
-                logger.warning(f"Only {len(symbols_for_analysis)} symbols available for calendar analysis, using basic weekday calendar")
-                return self._generate_business_days(start_date, end_date)
-            
-            # Count trading dates across all symbols
-            date_counts = {}
-            
-            for symbol in symbols_for_analysis[:10]:  # Analyze top 10 symbols to avoid overload
-                try:
-                    symbol_data = await self.get_price_data(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=None
-                    )
-                    
-                    for record in symbol_data:
-                        trading_date = record.date.date()
-                        date_counts[trading_date] = date_counts.get(trading_date, 0) + 1
-                        
-                except Exception as e:
-                    logger.warning(f"Could not analyze {symbol} for calendar: {e}")
-                    continue
-            
-            # Filter dates that appear in at least min_symbols
-            real_trading_dates = [
-                date for date, count in date_counts.items() 
-                if count >= min(min_symbols, len(symbols_for_analysis))
-            ]
-            
-            real_trading_dates.sort()
-            
-            logger.info(f"📊 Extracted {len(real_trading_dates)} real trading dates from {len(symbols_for_analysis)} symbols")
-            
-            return real_trading_dates
-            
-        except Exception as e:
-            logger.error(f"Error extracting real trading calendar: {e}")
-            # Fallback to basic weekday calendar
-            return self._generate_business_days(start_date, end_date)
-    
-    async def _get_symbols_for_calendar_analysis(self, start_date: datetime, end_date: datetime) -> List[str]:
-        """Get symbols with good data coverage for trading calendar analysis"""
-        try:
-            # Use the data statistics to get actual symbols in our database
-            stats = await self.get_data_statistics()
-            available_symbols = stats.get('symbols_with_data', [])
-            
-            if not available_symbols:
-                logger.error("No symbols found in database statistics - cannot perform data-driven calendar analysis")
-                return []
-            
-            logger.info(f"Using {len(available_symbols)} actual symbols from database for calendar analysis")
-            
-            # Return up to 20 symbols for calendar analysis (enough for good accuracy)
-            return available_symbols[:20]
-            
-        except Exception as e:
-            logger.error(f"Error getting actual symbols from database: {e}")
-            return []
-            
-            logger.info(f"Found {len(symbols_with_data)} symbols for trading calendar analysis")
-            return symbols_with_data
-            
-        except Exception as e:
-            logger.error(f"Error getting symbols for calendar analysis: {e}")
-            return []
-
-    def _generate_business_days(self, start_date: datetime, end_date: datetime) -> List[datetime.date]:
-        """Generate list of business days between two dates (weekdays only)
-        
-        Note: This only excludes weekends. For accurate gap analysis, 
-        Indian stock market holidays should be provided via configuration.
-        """
-        from datetime import timedelta
-        business_days = []
-        current = start_date.date()
-        end = end_date.date()
-        
-        while current <= end:
-            if current.weekday() < 5:  # Monday = 0, Friday = 4 (exclude weekends only)
-                business_days.append(current)
-            current += timedelta(days=1)
-        return business_days
-    
-    def _group_consecutive_dates(self, dates: List[datetime.date]) -> List[List[datetime.date]]:
-        """Group consecutive dates into gaps"""
-        if not dates:
-            return []
-        
-        dates = sorted(dates)
-        gaps = []
-        current_gap = [dates[0]]
-        
-        for i in range(1, len(dates)):
-            if (dates[i] - dates[i-1]).days == 1:
-                current_gap.append(dates[i])
-            else:
-                gaps.append(current_gap)
-                current_gap = [dates[i]]
-        
-        gaps.append(current_gap)
-        return gaps
-    
-    def _analyze_yearly_gaps(self, business_days: List[datetime.date], existing_dates: set) -> List[Dict]:
-        """Analyze gaps by year"""
-        yearly_data = {}
-        
-        for day in business_days:
-            year = day.year
-            if year not in yearly_data:
-                yearly_data[year] = {"expected": 0, "actual": 0}
-            yearly_data[year]["expected"] += 1
-            if day in existing_dates:
-                yearly_data[year]["actual"] += 1
-        
-        yearly_breakdown = []
-        for year, data in sorted(yearly_data.items()):
-            missing = data["expected"] - data["actual"]
-            percentage = (missing / data["expected"] * 100) if data["expected"] > 0 else 0
-            yearly_breakdown.append({
-                "year": year,
-                "expected_days": data["expected"],
-                "actual_days": data["actual"],
-                "missing_days": missing,
-                "gap_percentage": round(percentage, 2)
-            })
-        
-        return yearly_breakdown
-
-    async def update_symbol_status(self, symbol: str, is_up_to_date: bool = None, 
-                                 data_quality_score: float = None, 
-                                 force_update: bool = False) -> bool:
-        """
-        Update up-to-date status for a symbol in database
-        
-        Args:
-            symbol: Stock symbol to update
-            is_up_to_date: Whether symbol data is up-to-date (None to calculate)
-            data_quality_score: Quality score 0-100 (None to calculate)
-            force_update: Force update even if recently checked
-            
-        Returns:
-            bool: True if update was successful
-        """
-        try:
-            symbol_mappings_collection = self.db.symbol_mappings
-            
-            # Get current mapping
-            current_mapping = await symbol_mappings_collection.find_one({"_id": symbol})
-            if not current_mapping:
-                logger.warning(f"Symbol {symbol} not found in mappings")
-                return False
-            
-            # Check if we need to update (daily check or forced)
-            now = datetime.now()
-            last_check = current_mapping.get('last_status_check')
-            
-            if not force_update and last_check:
-                # Skip if checked within last 24 hours
-                if isinstance(last_check, str):
-                    last_check = datetime.fromisoformat(last_check.replace('Z', '+00:00'))
-                
-                if (now - last_check.replace(tzinfo=None)).total_seconds() < 86400:  # 24 hours
-                    return True
-            
-            # Calculate status if not provided
-            if is_up_to_date is None or data_quality_score is None:
-                try:
-                    # Analyze recent 365 days (1 year) for comprehensive quality assessment
-                    # This ensures we catch historical gaps, not just recent data
-                    end_date = now
-                    start_date = end_date - timedelta(days=365)
-                    
-                    gap_analysis = await self.analyze_data_gaps(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        auto_download=False
-                    )
-                    
-                    # Calculate up-to-date status (stricter criteria for 1-year analysis)
-                    if is_up_to_date is None:
-                        gap_percentage = gap_analysis.get('gap_percentage', 100)
-                        has_data = gap_analysis.get('has_data', False)
-                        total_actual_days = gap_analysis.get('total_actual_days', 0)
-                        # Stricter criteria: less than 10% gaps and at least 200 trading days
-                        is_up_to_date = has_data and gap_percentage < 10 and total_actual_days > 200
-                    
-                    # Calculate data quality score (0-100)
-                    if data_quality_score is None:
-                        gap_percentage = gap_analysis.get('gap_percentage', 100)
-                        has_data = gap_analysis.get('has_data', False)
-                        
-                        if not has_data:
-                            data_quality_score = 0
-                        else:
-                            # Score based on completeness: 100 - gap_percentage
-                            data_quality_score = max(0, 100 - gap_percentage)
-                            
-                except Exception as e:
-                    logger.warning(f"Could not calculate status for {symbol}: {e}")
-                    is_up_to_date = False if is_up_to_date is None else is_up_to_date
-                    data_quality_score = 0 if data_quality_score is None else data_quality_score
-            
-            # Update the document
-            update_data = {
-                "is_up_to_date": is_up_to_date,
-                "last_status_check": now,
-                "data_quality_score": data_quality_score
-            }
-            
-            result = await symbol_mappings_collection.update_one(
-                {"_id": symbol},
-                {"$set": update_data}
-            )
-            
-            if result.modified_count > 0:
-                logger.info(f"Updated status for {symbol}: up_to_date={is_up_to_date}, quality={data_quality_score:.1f}")
-                return True
-            else:
-                logger.warning(f"No update performed for {symbol}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error updating symbol status for {symbol}: {e}")
-            return False
-
-    async def batch_update_symbol_status(self, symbols: List[str] = None, 
-                                       force_update: bool = False) -> Dict[str, bool]:
-        """
-        Update status for multiple symbols (useful for daily batch updates)
-        
-        Args:
-            symbols: List of symbols to update (None for all mapped symbols)
-            force_update: Force update even if recently checked
-            
-        Returns:
-            Dict[str, bool]: Results for each symbol {symbol: success}
-        """
-        try:
-            if symbols is None:
-                # Get all mapped symbols
-                symbol_mappings_collection = self.db.symbol_mappings
-                cursor = symbol_mappings_collection.find(
-                    {"nse_scrip_code": {"$ne": None}},
-                    {"_id": 1}
-                )
-                symbols = [doc["_id"] async for doc in cursor]
-            
-            results = {}
-            total_symbols = len(symbols)
-            
-            logger.info(f"Starting batch status update for {total_symbols} symbols")
-            
-            for i, symbol in enumerate(symbols, 1):
-                try:
-                    success = await self.update_symbol_status(symbol, force_update=force_update)
-                    results[symbol] = success
-                    
-                    if i % 10 == 0:  # Progress logging every 10 symbols
-                        logger.info(f"Processed {i}/{total_symbols} symbols")
-                        
-                except Exception as e:
-                    logger.error(f"Error updating status for {symbol}: {e}")
-                    results[symbol] = False
-            
-            successful = sum(1 for success in results.values() if success)
-            logger.info(f"Batch update completed: {successful}/{total_symbols} successful")
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error in batch status update: {e}")
-            return {}
 
 async def test_stock_data_manager():
     """Test function for stock data manager"""

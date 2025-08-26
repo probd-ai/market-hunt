@@ -97,135 +97,100 @@ export interface NavItem {
   current: boolean;
 }
 
+// Chart Types
+export interface ChartData {
+  name: string;
+  value: number;
+}
+
+export interface IndustryChart {
+  industry: string;
+  companies: number;
+}
+
+export interface ChartConfig {
+  [key: string]: {
+    label: string;
+    color: string;
+  };
+}
+
 // Stock Data Management Types
 export interface SymbolMapping {
   symbol: string;
   company_name: string;
   industry: string;
   index_names: string[];
-  nse_scrip_code: number | null;
+  nse_scrip_code: string | null;
   nse_symbol: string | null;
   nse_name: string | null;
   match_confidence: number | null;
   last_updated: string | null;
-  is_up_to_date?: boolean | null; // Up-to-date status stored in database
-  data_quality_score?: number | null; // Quality score 0-100 based on data completeness
-  last_status_check?: string | null; // When status was last calculated
-  last_data_update?: string | null; // When data was last loaded/synced
 }
 
-export interface SymbolMappingResponse {
+export interface StockGapStatus {
+  symbol: string;
+  company_name: string;
+  industry: string;
+  index_names: string[];
+  nse_scrip_code: string | null;
+  has_data: boolean;
+  record_count: number;
+  date_range: {
+    start: string | null;
+    end: string | null;
+  };
+  data_freshness_days: number;
+  coverage_percentage: number;
+  last_price: number | null;
+  needs_update: boolean;
+  gap_details: string[];
+}
+
+export interface StockMappingsResponse {
   total_mappings: number;
   mapped_count: number;
   mappings: SymbolMapping[];
 }
 
-export interface StockPriceData {
-  scrip_code: number;
+export interface StockDownloadRequest {
   symbol: string;
-  date: string; // API returns ISO string, not Date object
-  open_price: number;
-  high_price: number;
-  low_price: number;
-  close_price: number;
-  volume: number;
-  value: number;
-  year_partition: number;
+  start_date?: string;
+  end_date?: string;
+  force_refresh?: boolean;
 }
 
-export interface StockDataResponse {
-  symbol: string;
-  total_records: number;
-  data: StockPriceData[];
-}
-
-export interface StockDataStatistics {
-  collections: {
-    [key: string]: {
-      record_count: number;
+export interface StockDownloadResponse {
+  success: boolean;
+  message: string;
+  task_id?: string;
+  result?: {
+    symbol: string;
+    records_processed: number;
+    operation_summary: {
+      inserts: number;
+      updates: number;
+      skipped: number;
     };
+    processing_time: number;
   };
-  total_records: number;
-  symbols_with_data: string[];
+}
+
+export interface StockStatistics {
+  total_symbols: number;
+  symbols_with_data: number;
+  total_price_records: number;
   date_range: {
     earliest: string;
     latest: string;
   };
-  unique_symbols_count: number;
-}
-
-export interface DownloadStockDataRequest {
-  symbol?: string;
-  symbols?: string[];
-  index_name?: string;
-  industry?: string;
-  start_date?: string;
-  end_date?: string;
-  sync_mode?: 'load' | 'sync' | 'refresh' | 'delete';
-}
-
-export interface ProgressUpdate {
-  task_id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  progress_percentage: number;
-  current_count: number;
-  total_count: number;
-  current_item?: string;
-  message?: string;
-  started_at: Date;
-  completed_at?: Date;
-  error?: string;
-}
-
-export interface HistoricalProcessing {
-  _id: string;
-  task_id: string;
-  request_type: 'symbol' | 'index' | 'industry';
-  request_params: DownloadStockDataRequest;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  progress_percentage: number;
-  items_processed: number;
-  total_items: number;
-  started_at: Date;
-  completed_at?: Date;
-  error_message?: string;
-  processed_symbols: string[];
-  failed_symbols: string[];
-}
-
-export interface DataGapInfo {
-  symbol: string;
-  missing_dates: string[];
-  first_date: string;
-  last_date: string;
-  total_gaps: number;
-  full_period_gaps?: boolean;
-  earliest_missing?: string;
-  latest_missing?: string;
-  user_range_start?: string;
-  user_range_end?: string;
-  user_range_gaps?: number;
-  data_available_from?: string;
-  data_available_until?: string;
-  total_data_points?: number;
-  realistic_start_date?: string; // Earliest date when data is actually downloadable
-  gaps_by_year?: { [year: string]: number }; // Missing days grouped by year (year -> missing_days_count)
-  downloadable_gaps?: number; // Only gaps in downloadable period
-}
-
-export interface SymbolMappingFilters {
-  index_name?: string;
-  symbols?: string[];
-  mapped_only?: boolean;
-  industry?: string;
-  symbol_search?: string;
-}
-
-// Chart Types
-export interface ChartData {
-  name: string;
-  value: number;
-  color?: string;
+  collections: {
+    [key: string]: number;
+  };
+  storage_info: {
+    total_size_mb: number;
+    index_size_mb: number;
+  };
 }
 
 // Statistics Types
@@ -239,52 +204,4 @@ export interface URLStatistics {
     index_name: string;
     last_downloaded: Date;
   }>;
-}
-
-// Scheduler Types
-export interface ProcessingDetail {
-  symbol: string;
-  status: 'success' | 'error' | 'skipped';
-  records_added?: number;
-  records_updated?: number;
-  records_skipped?: number;
-  processing_time?: string;
-  error_message?: string;
-}
-
-export interface ProcessEntry {
-  id: string;
-  type: string;
-  status: string;
-  symbol?: string;
-  index_name?: string;
-  industry?: string;
-  created_at: string;
-  started_at?: string;
-  completed_at?: string;
-  items_processed: number;
-  total_items: number;
-  current_item?: string;
-  error_message?: string;
-  processing_details?: ProcessingDetail[];
-  summary?: Record<string, any>;
-  request_type?: string;
-  request_params?: Record<string, any>;
-}
-
-export interface TaskProgress {
-  task_id: string;
-  status: string;
-  progress: number; // This is the percentage (0-100)
-  current_item?: string;
-  items_processed: number;
-  total_items: number;
-  start_time?: string;
-  estimated_completion?: string;
-}
-
-export interface SchedulerData {
-  pending: ProcessEntry[];
-  running: ProcessEntry[];
-  completed: ProcessEntry[];
 }

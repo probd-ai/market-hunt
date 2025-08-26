@@ -34,11 +34,6 @@ class SymbolMapping:
     nse_name: Optional[str] = None
     match_confidence: Optional[float] = None
     last_updated: Optional[datetime] = None
-    # Enhanced up-to-date status management
-    is_up_to_date: Optional[bool] = None
-    last_status_check: Optional[datetime] = None
-    data_quality_score: Optional[float] = None  # 0-100 score based on data completeness
-    last_data_update: Optional[datetime] = None  # When data was last loaded/synced
 
 
 @dataclass
@@ -495,7 +490,7 @@ class NSEDataClient:
         symbol = meta_symbol.get('Symbol', '').strip().upper()
         company_name = meta_symbol.get('Company Name', '').strip().upper()
         
-        if not symbol and not company_name:
+        if not symbol:
             return None
         
         best_match = None
@@ -504,25 +499,34 @@ class NSEDataClient:
         for master in masters_data:
             confidence = 0.0
             
+            # Get NSE symbol and split by '-' to get base symbol (like LT-EQ -> LT)
             nse_symbol = master.get('symbol', '').strip().upper()
-            nse_name = master.get('name', '').strip().upper()
+            if nse_symbol:
+                base_nse_symbol = nse_symbol.split('-')[0]  # Remove suffixes like -EQ, -BE, etc.
+            else:
+                base_nse_symbol = ''
             
-            # Exact symbol match (highest confidence)
-            if symbol and nse_symbol == symbol:
+            # Priority 1: Exact match with base NSE symbol (highest confidence)
+            if symbol and base_nse_symbol == symbol:
                 confidence = 1.0
-            # Partial symbol match
-            elif symbol and symbol in nse_symbol:
-                confidence = 0.8
-            elif symbol and nse_symbol in symbol:
+            # Priority 2: Exact match with full NSE symbol 
+            elif symbol and nse_symbol == symbol:
+                confidence = 0.95
+            # Priority 3: Symbol is part of NSE symbol (lower confidence)
+            elif symbol and nse_symbol and symbol in nse_symbol:
                 confidence = 0.7
+            # Priority 4: Base symbol is part of our symbol
+            elif symbol and base_nse_symbol and base_nse_symbol in symbol:
+                confidence = 0.6
             
-            # Company name matching
-            if company_name and nse_name:
-                name_similarity = self._calculate_name_similarity(company_name, nse_name)
-                confidence = max(confidence, name_similarity * 0.6)  # Lower weight for name matching
+            # Only use company name matching as a last resort and with very low confidence
+            if confidence == 0.0 and company_name:
+                nse_name = master.get('name', '').strip().upper()
+                if nse_name and company_name in nse_name:
+                    confidence = 0.3  # Very low confidence for name-only matching
             
-            # Update best match
-            if confidence > best_confidence and confidence > 0.5:  # Minimum threshold
+            # Update best match - require minimum confidence of 0.5 to avoid bad matches
+            if confidence > best_confidence and confidence >= 0.5:
                 best_confidence = confidence
                 best_match = {
                     **master,

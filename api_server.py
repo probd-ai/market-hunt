@@ -4,7 +4,7 @@ FastAPI Backend Server for Market Hunt Frontend
 Provides RESTful API endpoints for the Next.js frontend
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
@@ -16,6 +16,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import uvicorn
 import asyncio
+import pandas as pd  # Added for indicator optimizations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -63,12 +64,6 @@ class MongoDBConnection:
 # Global MongoDB connection
 mongo_conn = MongoDBConnection()
 
-# In-memory process tracking (in production, this should be in Redis or database)
-process_queue = []
-running_processes = {}
-completed_processes = []
-process_counter = 0
-
 # Pydantic models
 class URLConfig(BaseModel):
     url: str
@@ -80,32 +75,35 @@ class URLConfig(BaseModel):
 class ProcessURLRequest(BaseModel):
     url_ids: List[str]
 
-class ProcessEntry(BaseModel):
-    id: str
-    type: str
-    status: str
-    symbol: Optional[str] = None
-    index_name: Optional[str] = None
-    industry: Optional[str] = None
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    items_processed: int = 0
-    total_items: int = 0
-    current_item: Optional[str] = None
-    error_message: Optional[str] = None
-    processing_details: Optional[List[Dict[str, Any]]] = None
-    summary: Optional[Dict[str, Any]] = None
-
-class TaskProgress(BaseModel):
-    task_id: str
-    status: str
-    progress: float
-    current_item: Optional[str] = None
-    items_processed: int = 0
-    total_items: int = 0
-    start_time: Optional[str] = None
-    estimated_completion: Optional[str] = None
+class IndicatorRequest(BaseModel):
+    symbol: str
+    indicator_type: str
+    period: Optional[int] = 20
+    fast_period: Optional[int] = 12
+    slow_period: Optional[int] = 26
+    signal_period: Optional[int] = 9
+    std_dev: Optional[float] = 2.0
+    base_symbol: Optional[str] = "Nifty 500"  # Default base for CRS
+    lookback: Optional[List[int]] = None  # Multiple lookback periods for Dynamic Fibonacci
+    start_date: Optional[str] = None  # ISO format: YYYY-MM-DD
+    end_date: Optional[str] = None    # ISO format: YYYY-MM-DD
+    price_field: Optional[str] = "close_price"  # Field to use for calculation
+    
+    # TrueValueX specific parameters
+    s1: Optional[int] = None  # Alpha (short lookback)
+    m2: Optional[int] = None  # Beta (mid lookback)
+    l3: Optional[int] = None  # Gamma (long lookback)
+    strength: Optional[int] = None  # Trend Strength (bars)
+    w_long: Optional[float] = None  # Weight Long
+    w_mid: Optional[float] = None   # Weight Mid
+    w_short: Optional[float] = None # Weight Short
+    deadband_frac: Optional[float] = None  # Deadband γ (fraction of range)
+    min_deadband: Optional[float] = None   # Minimum Deadband
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 # Helper function to serialize MongoDB documents
 def serialize_doc(doc):
@@ -118,61 +116,6 @@ def serialize_doc(doc):
         if 'last_downloaded' in doc and doc['last_downloaded']:
             doc['last_downloaded'] = doc['last_downloaded'].isoformat() if hasattr(doc['last_downloaded'], 'isoformat') else str(doc['last_downloaded'])
     return doc
-
-# Scheduler helper functions
-def create_process_entry(process_type: str, **kwargs) -> ProcessEntry:
-    """Create a new process entry"""
-    global process_counter
-    process_counter += 1
-    
-    entry = ProcessEntry(
-        id=f"process_{process_counter}",
-        type=process_type,
-        status="pending",
-        created_at=datetime.now().isoformat(),
-        **kwargs
-    )
-    return entry
-
-def update_process_status(process_id: str, status: str, **kwargs):
-    """Update process status and other fields"""
-    # Update in running processes
-    if process_id in running_processes:
-        process = running_processes[process_id]
-        process.status = status
-        for key, value in kwargs.items():
-            setattr(process, key, value)
-        
-        # Move to completed if finished
-        if status in ["completed", "failed"]:
-            completed_processes.append(process)
-            del running_processes[process_id]
-    
-    # Update in queue
-    for process in process_queue:
-        if process.id == process_id:
-            process.status = status
-            for key, value in kwargs.items():
-                setattr(process, key, value)
-            break
-
-def get_process_by_id(process_id: str) -> Optional[ProcessEntry]:
-    """Get process by ID from any location"""
-    # Check running processes
-    if process_id in running_processes:
-        return running_processes[process_id]
-    
-    # Check queue
-    for process in process_queue:
-        if process.id == process_id:
-            return process
-    
-    # Check completed
-    for process in completed_processes:
-        if process.id == process_id:
-            return process
-    
-    return None
 
 @app.on_event("startup")
 async def startup_event():
@@ -221,8 +164,19 @@ async def get_data_overview():
         
         collection = mongo_conn.db.index_meta
         
-        # Get total documents
-        total_documents = collection.count_documents({})
+        # Get total unique companies (by Symbol)
+        unique_companies_pipeline = [
+            {
+                "$group": {
+                    "_id": "$Symbol"
+                }
+            },
+            {
+                "$count": "unique_companies"
+            }
+        ]
+        unique_companies_result = list(collection.aggregate(unique_companies_pipeline))
+        unique_companies_count = unique_companies_result[0]["unique_companies"] if unique_companies_result else 0
         
         # Get index-wise statistics
         pipeline = [
@@ -243,7 +197,7 @@ async def get_data_overview():
                 stat['last_update'] = stat['last_update'].isoformat() if hasattr(stat['last_update'], 'isoformat') else str(stat['last_update'])
         
         return JSONResponse(content={
-            "total_documents": total_documents,
+            "total_documents": unique_companies_count,
             "index_stats": index_stats
         })
         
@@ -296,23 +250,36 @@ async def get_industries_overview():
         
         collection = mongo_conn.db.index_meta
         
-        # Get total companies count
-        total_companies = collection.count_documents({})
+        # Get total unique companies count (by Symbol)
+        unique_companies_pipeline = [
+            {
+                "$group": {
+                    "_id": "$Symbol"
+                }
+            },
+            {
+                "$count": "unique_companies"
+            }
+        ]
+        unique_companies_result = list(collection.aggregate(unique_companies_pipeline))
+        unique_companies_count = unique_companies_result[0]["unique_companies"] if unique_companies_result else 0
         
         # Aggregate industry statistics with unique company counts
         pipeline = [
             {
                 "$group": {
-                    "_id": "$Industry",
-                    "companies": {"$addToSet": "$Symbol"},
-                    "indices": {"$addToSet": "$index_name"}
+                    "_id": {
+                        "industry": "$Industry",
+                        "symbol": "$Symbol"
+                    },
+                    "index_name": {"$first": "$index_name"}
                 }
             },
             {
-                "$project": {
-                    "_id": 1,
-                    "count": {"$size": "$companies"},
-                    "indices": 1
+                "$group": {
+                    "_id": "$_id.industry",
+                    "count": {"$sum": 1},
+                    "indices": {"$addToSet": "$index_name"}
                 }
             },
             {
@@ -326,7 +293,7 @@ async def get_industries_overview():
         total_industries = len(industry_stats)
         
         return JSONResponse(content={
-            "total_companies": total_companies,
+            "total_companies": unique_companies_count,
             "total_industries": total_industries,
             "industry_stats": industry_stats
         })
@@ -710,7 +677,7 @@ async def health_check():
     """Health check endpoint"""
     try:
         # Test MongoDB connection
-        if mongo_conn.db is not None:
+        if mongo_conn.db:
             mongo_conn.db.command("ping")
             db_status = "connected"
         else:
@@ -745,7 +712,6 @@ class StockDataRequest(BaseModel):
     start_date: Optional[str] = None  # ISO format: YYYY-MM-DD
     end_date: Optional[str] = None    # ISO format: YYYY-MM-DD
     force_refresh: Optional[bool] = False
-    sync_mode: Optional[str] = None   # 'load', 'refresh', 'delete' - load: smart sync from earliest missing year, refresh: full reload from 2005, delete: remove data
 
 class StockDataResponse(BaseModel):
     """Response model for stock data operations"""
@@ -758,13 +724,9 @@ class StockDataResponse(BaseModel):
 async def get_symbol_mappings(
     index_name: Optional[str] = None,
     industry: Optional[str] = None,
-    symbol_search: Optional[str] = None,
-    mapped_only: bool = False,
-    include_up_to_date: bool = Query(False, description="Include up-to-date status (slower)"),
-    limit: Optional[int] = Query(50, description="Number of mappings to return"),
-    offset: Optional[int] = Query(0, description="Number of mappings to skip")
+    mapped_only: bool = False
 ):
-    """Get symbol mappings with optimized up-to-date status from database"""
+    """Get symbol mappings between index_meta and NSE scripcode"""
     try:
         if mongo_conn.db is None:
             raise HTTPException(status_code=500, detail="Database connection not available")
@@ -772,73 +734,31 @@ async def get_symbol_mappings(
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            # Get all mappings efficiently
-            all_mappings = await manager.get_symbol_mappings(
+            mappings = await manager.get_symbol_mappings(
                 index_name=index_name,
                 industry=industry,
-                symbol_search=symbol_search,
                 mapped_only=mapped_only
             )
-            
-            # Apply pagination manually
-            start_idx = offset or 0
-            end_idx = start_idx + (limit or 50)
-            mappings = all_mappings[start_idx:end_idx]
-            total_mappings = len(all_mappings)
             
             # Convert to dict for JSON serialization
             mappings_data = []
             for mapping in mappings:
-                # For fast path, get existing status from DB (might be None)
-                is_up_to_date = getattr(mapping, 'is_up_to_date', None)
-                data_quality_score = getattr(mapping, 'data_quality_score', None)
-                last_status_check = getattr(mapping, 'last_status_check', None)
-                last_data_update = getattr(mapping, 'last_data_update', None)
-                
-                # Only calculate status if explicitly requested and not available
-                if include_up_to_date and is_up_to_date is None and mapping.nse_scrip_code:
-                    try:
-                        # Calculate status on demand (slower path)
-                        await manager.update_symbol_status(mapping.symbol, force_update=True)
-                        # Get updated values
-                        updated_mapping = await manager._get_symbol_mapping_by_symbol(mapping.symbol)
-                        if updated_mapping:
-                            is_up_to_date = updated_mapping.is_up_to_date
-                            data_quality_score = updated_mapping.data_quality_score
-                            last_status_check = updated_mapping.last_status_check
-                            last_data_update = updated_mapping.last_data_update
-                            
-                    except Exception as e:
-                        logger.warning(f"Could not calculate status for {mapping.symbol}: {e}")
-                        is_up_to_date = False
-                        data_quality_score = 0
-                
                 mapping_dict = {
                     "symbol": mapping.symbol,
                     "company_name": mapping.company_name,
                     "industry": mapping.industry,
-                    "index_names": mapping.index_names,
+                    "index_names": mapping.index_names,  # Now an array
                     "nse_scrip_code": mapping.nse_scrip_code,
                     "nse_symbol": mapping.nse_symbol,
                     "nse_name": mapping.nse_name,
                     "match_confidence": mapping.match_confidence,
-                    "last_updated": mapping.last_updated.isoformat() if mapping.last_updated else None,
-                    "is_up_to_date": is_up_to_date,
-                    "data_quality_score": data_quality_score,
-                    "last_status_check": last_status_check.isoformat() if last_status_check else None,
-                    "last_data_update": last_data_update.isoformat() if last_data_update else None
+                    "last_updated": mapping.last_updated.isoformat() if mapping.last_updated else None
                 }
                 mappings_data.append(mapping_dict)
             
-            # Calculate correct mapped count from all symbols, not just returned subset
-            total_mapped_count = len([m for m in all_mappings if getattr(m, 'nse_scrip_code', None) is not None])
-            
             return JSONResponse(content={
-                "total_mappings": total_mappings,
-                "returned_count": len(mappings_data),
-                "mapped_count": total_mapped_count,
-                "offset": offset or 0,
-                "limit": limit,
+                "total_mappings": len(mappings_data),
+                "mapped_count": len([m for m in mappings_data if m["nse_scrip_code"] is not None]),
                 "mappings": mappings_data
             })
             
@@ -848,10 +768,7 @@ async def get_symbol_mappings(
 
 @app.post("/api/stock/mappings/refresh")
 async def refresh_symbol_mappings():
-    """
-    Refresh symbol mappings from index_meta and NSE masters, 
-    then update status information with force=true
-    """
+    """Refresh symbol mappings from index_meta and NSE masters"""
     try:
         if mongo_conn.db is None:
             raise HTTPException(status_code=500, detail="Database connection not available")
@@ -859,195 +776,24 @@ async def refresh_symbol_mappings():
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            # Step 1: Refresh symbol mappings (preserves existing status fields)
-            logger.info("🔄 Step 1: Refreshing symbol mappings from index data...")
-            mapping_result = await manager.refresh_symbol_mappings_from_index_meta()
-            
-            # Step 2: Update all symbol status with force=true
-            logger.info("🔄 Step 2: Updating symbol status information...")
-            status_result = await manager.batch_update_symbol_status(
-                symbols=None,  # Update all symbols
-                force_update=True  # Force update regardless of last check time
-            )
-            
-            successful_mappings = mapping_result.get("updated", 0) + mapping_result.get("inserted", 0)
-            successful_status = sum(1 for success in status_result.values() if success)
-            total_symbols = len(status_result)
+            result = await manager.refresh_symbol_mappings_from_index_meta()
             
             return JSONResponse(content={
                 "success": True,
-                "message": f"Refreshed {successful_mappings} mappings and updated status for {successful_status}/{total_symbols} symbols",
-                "mapping_result": mapping_result,
-                "status_result": {
-                    "total_symbols": total_symbols,
-                    "successful_updates": successful_status,
-                    "failed_updates": total_symbols - successful_status
-                }
+                "message": "Symbol mappings refreshed successfully",
+                "result": result
             })
             
     except Exception as e:
         logger.error(f"Error refreshing symbol mappings: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh symbol mappings: {str(e)}")
 
-@app.post("/api/stock/mappings/fix-duplicates")
-async def fix_duplicate_nse_codes():
-    """Fix duplicate NSE scrip codes and incorrect mappings"""
-    try:
-        if mongo_conn.db is None:
-            raise HTTPException(status_code=500, detail="Database connection not available")
-        
-        collection = mongo_conn.db.symbol_mappings
-        fixed_count = 0
-        issues_found = []
-        
-        # Find duplicate NSE scrip codes
-        pipeline = [
-            {"$group": {
-                "_id": "$nse_scrip_code",
-                "symbols": {"$push": {"symbol": "$symbol", "nse_name": "$nse_name", "company_name": "$company_name"}},
-                "count": {"$sum": 1}
-            }},
-            {"$match": {"count": {"$gt": 1}, "_id": {"$ne": None}}}
-        ]
-        
-        duplicates = list(collection.aggregate(pipeline))
-        
-        for dup in duplicates:
-            nse_code = dup["_id"]
-            symbols = dup["symbols"]
-            
-            issues_found.append({
-                "nse_scrip_code": nse_code,
-                "symbols": symbols,
-                "issue": "duplicate_nse_code"
-            })
-            
-            # Specific fix for IOC/BIOCON issue (NSE code 11373)
-            if nse_code == 11373:
-                # Keep BIOCON with 11373, fix IOC
-                for symbol_info in symbols:
-                    if symbol_info["symbol"] == "IOC":
-                        # Remove incorrect NSE mapping for IOC
-                        result = collection.update_one(
-                            {"symbol": "IOC"},
-                            {"$unset": {
-                                "nse_scrip_code": "",
-                                "nse_symbol": "",
-                                "nse_name": ""
-                            },
-                             "$set": {
-                                "match_confidence": 0.0,
-                                "last_updated": datetime.now()
-                            }}
-                        )
-                        if result.modified_count > 0:
-                            fixed_count += 1
-                            logger.info(f"Fixed IOC mapping - removed incorrect NSE code 11373")
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": f"Fixed {fixed_count} duplicate mappings",
-            "fixed_count": fixed_count,
-            "issues_found": issues_found
-        })
-        
-    except Exception as e:
-        logger.error(f"Error fixing duplicate NSE codes: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fix duplicates: {str(e)}")
-
-@app.post("/api/stock/mappings/update-status")
-async def update_up_to_date_status(
-    symbols: Optional[List[str]] = None,
-    force_update: bool = False
-):
-    """Update up-to-date status for symbols using optimized database storage"""
-    try:
-        if mongo_conn.db is None:
-            raise HTTPException(status_code=500, detail="Database connection not available")
-        
-        from stock_data_manager import StockDataManager
-        
-        async with StockDataManager() as manager:
-            # Use new batch update method
-            results = await manager.batch_update_symbol_status(
-                symbols=symbols,
-                force_update=force_update
-            )
-            
-            successful = sum(1 for success in results.values() if success)
-            total = len(results)
-            
-            return JSONResponse(content={
-                "success": True,
-                "message": f"Updated status for {successful}/{total} symbols",
-                "updated_count": successful,
-                "failed_count": total - successful,
-                "details": results
-            })
-            
-    except Exception as e:
-        logger.error(f"Error updating symbol status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update symbol status: {str(e)}")
-
-@app.post("/api/stock/data/load/{symbol}")
-async def load_symbol_data(
-    symbol: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    sync_mode: str = "load"
-):
-    """Load/refresh data for a specific symbol and update its status"""
-    try:
-        if mongo_conn.db is None:
-            raise HTTPException(status_code=500, detail="Database connection not available")
-        
-        from stock_data_manager import StockDataManager
-        from datetime import datetime, timedelta
-        
-        async with StockDataManager() as manager:
-            # Parse dates
-            if start_date:
-                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(tzinfo=None)
-            else:
-                start_dt = datetime.now() - timedelta(days=365)  # Default to 1 year
-                
-            if end_date:
-                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(tzinfo=None)
-            else:
-                end_dt = datetime.now()
-            
-            # Download data based on sync mode
-            if sync_mode == "refresh":
-                # Delete existing data first for the date range
-                await manager._delete_symbol_data(symbol, start_dt, end_dt)
-            
-            # Download the data
-            result = await manager.download_historical_data_for_symbol(
-                symbol=symbol,
-                start_date=start_dt,
-                end_date=end_dt
-            )
-            
-            # Update the symbol's up-to-date status
-            await manager.update_symbol_status(symbol, force_update=True)
-            
-            return JSONResponse(content={
-                "success": True,
-                "message": f"Data loaded for {symbol}",
-                "result": result,
-                "sync_mode": sync_mode
-            })
-            
-    except Exception as e:
-        logger.error(f"Error loading data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to load data for {symbol}: {str(e)}")
-
 @app.get("/api/stock/data/{symbol}")
 async def get_stock_price_data(
     symbol: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: Optional[int] = 5000  # Increased for 5 years of data (~250 trading days per year)
+    limit: Optional[int] = 1000  # Increased default limit
 ):
     """Get historical price data for a symbol"""
     try:
@@ -1061,11 +807,20 @@ async def get_stock_price_data(
         end_dt = datetime.fromisoformat(end_date) if end_date else None
         
         async with StockDataManager() as manager:
+            # Get total count without limit for progress tracking
+            total_count = await manager.get_price_data_count(
+                symbol=symbol,
+                start_date=start_dt,
+                end_date=end_dt
+            )
+            
+            # Get actual data with limit (sorted by date descending - newest first)
             price_data = await manager.get_price_data(
                 symbol=symbol,
                 start_date=start_dt,
                 end_date=end_dt,
-                limit=limit
+                limit=limit,
+                sort_order=-1  # -1 for descending (newest first)
             )
             
             # Convert to dict for JSON serialization
@@ -1087,121 +842,14 @@ async def get_stock_price_data(
             
             return JSONResponse(content={
                 "symbol": symbol,
-                "total_records": len(price_records),
+                "total_records": total_count,  # Actual total count
+                "returned_records": len(price_records),  # Records in this response
                 "data": price_records
             })
             
     except Exception as e:
         logger.error(f"Error fetching price data for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch price data: {str(e)}")
-
-class GapAnalysisRequest(BaseModel):
-    """Request model for gap analysis"""
-    symbol: Optional[str] = None
-    index_name: Optional[str] = None
-    industry: Optional[str] = None
-    start_date: str  # ISO format: YYYY-MM-DD
-    end_date: str    # ISO format: YYYY-MM-DD
-    auto_download: bool = True  # Whether to download missing data first
-    full_historical_analysis: bool = False  # Whether to discover and analyze complete NSE trading range
-
-@app.post("/api/stock/gaps")
-async def analyze_data_gaps(request: GapAnalysisRequest):
-    """Analyze data gaps for symbols, indexes, or industries
-    
-    If auto_download=True (default), will attempt to download missing data first
-    before performing gap analysis. This ensures accurate gap detection.
-    """
-    try:
-        if mongo_conn.db is None:
-            raise HTTPException(status_code=500, detail="Database connection not available")
-        
-        from stock_data_manager import StockDataManager
-        
-        # Parse dates
-        start_dt = datetime.fromisoformat(request.start_date)
-        end_dt = datetime.fromisoformat(request.end_date)
-        
-        async with StockDataManager() as manager:
-            if request.symbol:
-                # Single symbol gap analysis
-                gaps = await manager.analyze_data_gaps(
-                    symbol=request.symbol,
-                    start_date=start_dt,
-                    end_date=end_dt,
-                    auto_download=request.auto_download,
-                    full_historical_analysis=request.full_historical_analysis
-                )
-                return JSONResponse(content={
-                    "symbol": request.symbol,
-                    "date_range": {
-                        "start": request.start_date,
-                        "end": request.end_date
-                    },
-                    "gaps": gaps
-                })
-            
-            elif request.index_name:
-                # Index gap analysis
-                symbols = await manager.get_index_symbols(request.index_name)
-                if not symbols:
-                    raise HTTPException(status_code=404, detail=f"Index {request.index_name} not found")
-                
-                all_gaps = {}
-                for symbol in symbols[:5]:  # Limit to first 5 for performance
-                    gaps = await manager.analyze_data_gaps(
-                        symbol=symbol,
-                        start_date=start_dt,
-                        end_date=end_dt,
-                        auto_download=request.auto_download,
-                        full_historical_analysis=request.full_historical_analysis
-                    )
-                    all_gaps[symbol] = gaps
-                
-                return JSONResponse(content={
-                    "index_name": request.index_name,
-                    "date_range": {
-                        "start": request.start_date,
-                        "end": request.end_date
-                    },
-                    "symbols_analyzed": list(all_gaps.keys()),
-                    "gaps": all_gaps
-                })
-            
-            elif request.industry:
-                # Industry gap analysis
-                symbols = await manager.get_industry_symbols(request.industry)
-                if not symbols:
-                    raise HTTPException(status_code=404, detail=f"Industry {request.industry} not found")
-                
-                all_gaps = {}
-                for symbol in symbols[:5]:  # Limit to first 5 for performance
-                    gaps = await manager.analyze_data_gaps(
-                        symbol=symbol,
-                        start_date=start_dt,
-                        end_date=end_dt,
-                        auto_download=request.auto_download,
-                        full_historical_analysis=request.full_historical_analysis
-                    )
-                    all_gaps[symbol] = gaps
-                
-                return JSONResponse(content={
-                    "industry": request.industry,
-                    "date_range": {
-                        "start": request.start_date,
-                        "end": request.end_date
-                    },
-                    "symbols_analyzed": list(all_gaps.keys()),
-                    "gaps": all_gaps
-                })
-            else:
-                raise HTTPException(status_code=400, detail="Must specify symbol, index_name, or industry")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error analyzing data gaps: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze gaps: {str(e)}")
 
 @app.post("/api/stock/download")
 async def download_stock_data(request: StockDataRequest, background_tasks: BackgroundTasks):
@@ -1214,133 +862,65 @@ async def download_stock_data(request: StockDataRequest, background_tasks: Backg
         start_dt = datetime.fromisoformat(request.start_date) if request.start_date else None
         end_dt = datetime.fromisoformat(request.end_date) if request.end_date else None
         
-        # Handle sync_mode mapping
-        force_refresh = request.force_refresh
-        smart_load = False  # New flag for smart loading from earliest missing year
-        
-        if request.sync_mode:
-            if request.sync_mode == 'refresh':
-                force_refresh = True  # Full reload from 2005
-                start_dt = datetime(2005, 1, 1)  # Override start date for refresh
-            elif request.sync_mode == 'load':
-                smart_load = True  # Smart load from earliest missing year
-                force_refresh = False
-            # 'delete' mode is handled separately in delete endpoints
-        
-        # Determine download type and create scheduler entry
+        # Determine download type
         if request.symbol:
             # Single symbol download
-            process = create_process_entry(
-                process_type="symbol_download",
-                symbol=request.symbol,
-                total_items=1
-            )
-            process_queue.append(process)
-            
             background_tasks.add_task(
                 download_symbol_data_task,
-                process.id,
                 request.symbol,
                 start_dt,
                 end_dt,
-                force_refresh,
-                smart_load
+                request.force_refresh
             )
             return JSONResponse(content={
                 "success": True,
                 "message": f"Started downloading data for symbol: {request.symbol}",
-                "type": "symbol",
-                "process_id": process.id
+                "type": "symbol"
             })
             
         elif request.symbols:
             # Multiple symbols download
-            process = create_process_entry(
-                process_type="symbols_download",
-                total_items=len(request.symbols)
-            )
-            process_queue.append(process)
-            
             background_tasks.add_task(
                 download_symbols_data_task,
-                process.id,
                 request.symbols,
                 start_dt,
                 end_dt,
-                force_refresh,
-                smart_load
+                request.force_refresh
             )
             return JSONResponse(content={
                 "success": True,
                 "message": f"Started downloading data for {len(request.symbols)} symbols",
-                "type": "symbols",
-                "process_id": process.id
+                "type": "symbols"
             })
             
         elif request.index_name:
-            # Index download - get symbol count first
-            try:
-                collection = mongo_conn.db.symbol_mappings
-                symbol_count = collection.count_documents({"index_names": request.index_name})
-                if symbol_count == 0:
-                    raise HTTPException(status_code=404, detail=f"No symbols found for index: {request.index_name}")
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to get symbol count: {str(e)}")
-            
-            process = create_process_entry(
-                process_type="index_download",
-                index_name=request.index_name,
-                total_items=symbol_count
-            )
-            process_queue.append(process)
-            
+            # Index download
             background_tasks.add_task(
                 download_index_data_task,
-                process.id,
                 request.index_name,
                 start_dt,
                 end_dt,
-                force_refresh,
-                smart_load
+                request.force_refresh
             )
             return JSONResponse(content={
                 "success": True,
-                "message": f"Started downloading data for index: {request.index_name} ({symbol_count} symbols)",
-                "type": "index",
-                "process_id": process.id
+                "message": f"Started downloading data for index: {request.index_name}",
+                "type": "index"
             })
             
         elif request.industry_name:
-            # Industry download - get symbol count first
-            try:
-                collection = mongo_conn.db.index_meta
-                symbol_count = collection.count_documents({"Industry": request.industry_name})
-                if symbol_count == 0:
-                    raise HTTPException(status_code=404, detail=f"No symbols found for industry: {request.industry_name}")
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to get symbol count: {str(e)}")
-            
-            process = create_process_entry(
-                process_type="industry_download",
-                industry=request.industry_name,
-                total_items=symbol_count
-            )
-            process_queue.append(process)
-            
+            # Industry download
             background_tasks.add_task(
                 download_industry_data_task,
-                process.id,
                 request.industry_name,
                 start_dt,
                 end_dt,
-                force_refresh,
-                smart_load
+                request.force_refresh
             )
             return JSONResponse(content={
                 "success": True,
-                "message": f"Started downloading data for industry: {request.industry_name} ({symbol_count} symbols)",
-                "type": "industry",
-                "process_id": process.id
+                "message": f"Started downloading data for industry: {request.industry_name}",
+                "type": "industry"
             })
         else:
             raise HTTPException(status_code=400, detail="Must specify symbol, symbols, index_name, or industry_name")
@@ -1376,609 +956,399 @@ async def get_stock_data_statistics():
         logger.error(f"Error fetching stock data statistics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch statistics: {str(e)}")
 
-# Background task functions for stock data downloads
-async def download_symbol_data_task(process_id: str, symbol: str, start_date: datetime, end_date: datetime, force_refresh: bool, smart_load: bool = False):
-    """Background task to download data for a single symbol"""
-    processing_details = []
-    summary = {
-        "total_symbols": 1,
-        "successful_symbols": 0,
-        "failed_symbols": 0,
-        "total_records_added": 0,
-        "total_records_updated": 0,
-        "total_records_skipped": 0
-    }
-    
+@app.post("/api/stock/check-gaps")
+def check_stock_gaps(symbols: List[str]):
+    """Get gap status for multiple symbols from the cached gap_status collection"""
     try:
-        # Move process from queue to running
-        process = get_process_by_id(process_id)
-        if process:
-            update_process_status(process_id, "running", started_at=datetime.now().isoformat())
-            running_processes[process_id] = process
-            # Remove from queue
-            global process_queue
-            process_queue = [p for p in process_queue if p.id != process_id]
+        if mongo_conn.db is None:
+            raise HTTPException(status_code=500, detail="Database connection not available")
+        
+        gap_statuses = []
+        for symbol in symbols:
+            symbol = symbol.upper()
+            
+            # Get cached gap status from database
+            gap_doc = mongo_conn.db["gap_status"].find_one({"symbol": symbol})
+            
+            if not gap_doc:
+                # No cached status found, return default values
+                gap_statuses.append({
+                    "symbol": symbol,
+                    "company_name": "Unknown",
+                    "industry": "Unknown",
+                    "index_names": [],
+                    "nse_scrip_code": None,
+                    "has_data": False,
+                    "record_count": 0,
+                    "date_range": {"start": None, "end": None},
+                    "data_freshness_days": 0,
+                    "coverage_percentage": 0,
+                    "last_price": None,
+                    "needs_update": True,
+                    "gap_details": ["Gap status not calculated yet. Run 'update-gap-status' command."],
+                    "last_calculated": None
+                })
+            else:
+                # Convert cached status to response format
+                gap_statuses.append({
+                    "symbol": gap_doc["symbol"],
+                    "company_name": gap_doc["company_name"],
+                    "industry": gap_doc["industry"],
+                    "index_names": gap_doc["index_names"],
+                    "nse_scrip_code": gap_doc["nse_scrip_code"],
+                    "has_data": gap_doc["has_data"],
+                    "record_count": gap_doc["record_count"],
+                    "date_range": gap_doc["date_range"],
+                    "data_freshness_days": gap_doc["data_freshness_days"],
+                    "coverage_percentage": gap_doc["coverage_percentage"],
+                    "last_price": gap_doc.get("last_price"),
+                    "needs_update": gap_doc["needs_update"],
+                    "gap_details": gap_doc["gap_details"],
+                    "last_calculated": gap_doc["last_calculated"].isoformat() if gap_doc.get("last_calculated") else None
+                })
+        
+        return JSONResponse(content=gap_statuses)
+        
+    except Exception as e:
+        logger.error(f"Error checking stock gaps: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to check gaps: {str(e)}")
+
+@app.post("/api/stock/indicators")
+async def calculate_stock_indicators(request: IndicatorRequest):
+    """Calculate technical indicators for stock price data - Optimized"""
+    try:
+        if mongo_conn.db is None:
+            raise HTTPException(status_code=500, detail="Database connection not available")
         
         from stock_data_manager import StockDataManager
+        from indicator_engine import IndicatorEngine
         
+        # Optimize date range - if not provided, use smart defaults based on indicator period
+        if not request.start_date or not request.end_date:
+            end_dt = datetime.now()
+            
+            # Calculate minimum required data points (period * 3 for better SMA accuracy)
+            min_points_needed = max(request.period * 3, 100)  
+            
+            # Estimate days needed (accounting for weekends/holidays)
+            days_needed = min_points_needed * 1.5
+            start_dt = end_dt - pd.Timedelta(days=days_needed)
+            
+            logger.info(f"Auto-calculated date range: {start_dt.date()} to {end_dt.date()} for {request.period}-period indicator")
+        else:
+            start_dt = datetime.fromisoformat(request.start_date)
+            end_dt = datetime.fromisoformat(request.end_date)
+        
+        # Get price data with optimized limit
         async with StockDataManager() as manager:
-            processing_start = datetime.now()
-            detail = {
-                "symbol": symbol,
-                "status": "error",
-                "records_added": 0,
-                "records_updated": 0,
-                "records_skipped": 0,
-                "processing_time": "",
-                "error_message": None
-            }
+            # Calculate appropriate limit based on date range
+            date_range_days = (end_dt - start_dt).days
+            if date_range_days > 365 * 5:  # More than 5 years
+                initial_limit = 50000  # Large limit for ALL timeframe
+            elif date_range_days > 365:    # More than 1 year
+                initial_limit = 20000  # Medium limit for 5Y timeframe
+            else:
+                initial_limit = 10000  # Small limit for 1Y timeframe
             
-            try:
-                result = await manager.download_historical_data_for_symbol(
-                    symbol=symbol,
-                    start_date=start_date,
-                    end_date=end_date,
-                    force_refresh=force_refresh,
-                    smart_load=smart_load
-                )
-                
-                # Calculate processing time
-                processing_end = datetime.now()
-                processing_time = processing_end - processing_start
-                detail["processing_time"] = f"{processing_time.total_seconds():.2f}s"
-                
-                # Extract result details
-                if isinstance(result, dict):
-                    # Check if result contains an error
-                    if "error" in result:
-                        detail["status"] = "error"
-                        detail["error_message"] = result["error"]
-                        summary["failed_symbols"] += 1
-                    else:
-                        detail["records_added"] = result.get("records_added", 0)
-                        detail["records_updated"] = result.get("records_updated", 0)
-                        detail["records_skipped"] = result.get("records_skipped", 0)
-                        detail["status"] = "success"
-                        
-                        # Update summary
-                        summary["total_records_added"] += detail["records_added"]
-                        summary["total_records_updated"] += detail["records_updated"]
-                        summary["total_records_skipped"] += detail["records_skipped"]
-                        summary["successful_symbols"] += 1
-                else:
-                    detail["status"] = "success"
-                    summary["successful_symbols"] += 1
-                
-                # Update symbol status after successful download
-                if detail["status"] == "success":
-                    try:
-                        await manager.update_symbol_data_timestamp(symbol)
-                        await manager.update_symbol_status(symbol, force_update=True)
-                        logger.info(f"✅ Updated status for symbol {symbol}")
-                    except Exception as status_error:
-                        logger.warning(f"Failed to update status for {symbol}: {status_error}")
-                
-                logger.info(f"✅ Background download completed for symbol {symbol}: {result}")
-                
-            except Exception as e:
-                detail["status"] = "error"
-                detail["error_message"] = str(e)
-                summary["failed_symbols"] += 1
-                processing_end = datetime.now()
-                processing_time = processing_end - processing_start
-                detail["processing_time"] = f"{processing_time.total_seconds():.2f}s"
-                logger.error(f"❌ Failed to download data for symbol {symbol}: {e}")
+            logger.info(f"Using limit {initial_limit} for {date_range_days} days of data")
             
-            processing_details.append(detail)
-            
-            # Update process as completed with detailed results
-            process = get_process_by_id(process_id)
-            if process:
-                process.processing_details = processing_details
-                process.summary = summary
-            
-            update_process_status(
-                process_id, 
-                "completed", 
-                completed_at=datetime.now().isoformat(),
-                items_processed=1
+            price_data = await manager.get_price_data(
+                symbol=request.symbol,
+                start_date=start_dt,
+                end_date=end_dt,
+                limit=initial_limit,
+                sort_order=1  # Ascending order for indicator calculation
             )
             
+            if not price_data:
+                raise HTTPException(status_code=404, detail=f"No price data found for symbol {request.symbol}")
+            
+            # Check if we have enough data for the indicator
+            if len(price_data) < request.period:
+                # Try to get more data by extending the date range
+                extended_start = start_dt - pd.Timedelta(days=365)  # Go back 1 year
+                logger.info(f"Insufficient data ({len(price_data)} points), extending range to {extended_start.date()}")
+                
+                price_data = await manager.get_price_data(
+                    symbol=request.symbol,
+                    start_date=extended_start,
+                    end_date=end_dt,
+                    limit=20000,
+                    sort_order=1
+                )
+                
+                if len(price_data) < request.period:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Insufficient data for {request.period}-period indicator. Found {len(price_data)} points, need at least {request.period}"
+                    )
+            
+            # Convert price data to dict format for indicator engine (optimized)
+            price_records = []
+            for record in price_data:
+                price_dict = {
+                    "date": record.date.isoformat(),
+                    "close_price": record.close_price,  # Always include close_price
+                }
+                
+                # Only include other fields if needed
+                if request.price_field != 'close_price':
+                    price_dict[request.price_field] = getattr(record, request.price_field)
+                
+                # For MACD, Bollinger, CRS, Dynamic Fibonacci, and TrueValueX indicators, include OHLC
+                if request.indicator_type in ['macd', 'bollinger', 'crs', 'dynamic_fib', 'truevx']:
+                    price_dict.update({
+                        "open_price": record.open_price,
+                        "high_price": record.high_price,
+                        "low_price": record.low_price,
+                        "volume": record.volume,
+                    })
+                
+                price_records.append(price_dict)
+            
+            # Initialize indicator engine
+            engine = IndicatorEngine()
+            
+            # Prepare parameters for indicator calculation
+            calc_params = {
+                "period": request.period,
+                "price_field": request.price_field
+            }
+            
+            # Add specific parameters for different indicators
+            if request.indicator_type == 'macd':
+                calc_params.update({
+                    "fast_period": request.fast_period,
+                    "slow_period": request.slow_period,
+                    "signal_period": request.signal_period
+                })
+            elif request.indicator_type == 'bollinger':
+                calc_params.update({
+                    "std_dev": request.std_dev
+                })
+            elif request.indicator_type == 'crs':
+                calc_params.update({
+                    "base_symbol": request.base_symbol,
+                    "start_date": start_dt.isoformat() if start_dt else None,
+                    "end_date": end_dt.isoformat() if end_dt else None
+                })
+            elif request.indicator_type == 'dynamic_fib':
+                # Set default lookback periods if not provided
+                lookback_periods = request.lookback if request.lookback else [22, 66, 222]
+                calc_params.update({
+                    "lookback": lookback_periods
+                })
+            elif request.indicator_type == 'truevx':
+                calc_params.update({
+                    "base_symbol": request.base_symbol or "Nifty 50",
+                    "start_date": start_dt.isoformat() if start_dt else None,
+                    "end_date": end_dt.isoformat() if end_dt else None
+                })
+            
+            # Calculate indicator (now with caching and optimization)
+            try:
+                calculation_start = datetime.now()
+                
+                # Special handling for CRS and TrueValueX since they're async
+                if request.indicator_type == 'crs':
+                    indicator_data = await engine.calculate_crs(
+                        data=price_records,
+                        base_symbol=request.base_symbol,
+                        start_date=start_dt.isoformat() if start_dt else None,
+                        end_date=end_dt.isoformat() if end_dt else None
+                    )
+                elif request.indicator_type == 'truevx':
+                    # Pass additional TrueValueX parameters
+                    truevx_params = {}
+                    if request.s1 is not None:
+                        truevx_params['s1'] = request.s1
+                    if request.m2 is not None:
+                        truevx_params['m2'] = request.m2
+                    if request.l3 is not None:
+                        truevx_params['l3'] = request.l3
+                    if request.strength is not None:
+                        truevx_params['strength'] = request.strength
+                    if request.w_long is not None:
+                        truevx_params['w_long'] = request.w_long
+                    if request.w_mid is not None:
+                        truevx_params['w_mid'] = request.w_mid
+                    if request.w_short is not None:
+                        truevx_params['w_short'] = request.w_short
+                    if request.deadband_frac is not None:
+                        truevx_params['deadband_frac'] = request.deadband_frac
+                    if request.min_deadband is not None:
+                        truevx_params['min_deadband'] = request.min_deadband
+                    
+                    indicator_data = await engine.calculate_truevx_ranking(
+                        data=price_records,
+                        base_symbol=request.base_symbol or "Nifty 50",
+                        start_date=start_dt.isoformat() if start_dt else None,
+                        end_date=end_dt.isoformat() if end_dt else None,
+                        **truevx_params
+                    )
+                else:
+                    indicator_data = engine.calculate_indicator(
+                        indicator_type=request.indicator_type,
+                        data=price_records,
+                        **calc_params
+                    )
+                calculation_time = (datetime.now() - calculation_start).total_seconds()
+                
+                logger.info(f"Indicator calculation completed in {calculation_time:.3f}s")
+                
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+            
+            return JSONResponse(content={
+                "symbol": request.symbol,
+                "indicator_type": request.indicator_type,
+                "parameters": calc_params,
+                "total_points": len(indicator_data),
+                "price_data_points": len(price_records),
+                "calculation_time_seconds": round(calculation_time, 3),
+                "data": indicator_data
+            })
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        # Update process as failed
-        update_process_status(
-            process_id, 
-            "failed", 
-            completed_at=datetime.now().isoformat(),
-            error_message=str(e)
-        )
-        logger.error(f"❌ Background download failed for symbol {symbol}: {e}")
+        logger.error(f"Error calculating indicators for {request.symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate indicators: {str(e)}")
 
-async def download_symbols_data_task(process_id: str, symbols: List[str], start_date: datetime, end_date: datetime, force_refresh: bool, smart_load: bool = False):
-    """Background task to download data for multiple symbols"""
-    processing_details = []
-    summary = {
-        "total_symbols": len(symbols),
-        "successful_symbols": 0,
-        "failed_symbols": 0,
-        "total_records_added": 0,
-        "total_records_updated": 0,
-        "total_records_skipped": 0
-    }
-    
+@app.get("/api/stock/indicators/supported")
+async def get_supported_indicators():
+    """Get list of supported technical indicators"""
     try:
-        # Move process from queue to running
-        process = get_process_by_id(process_id)
-        if process:
-            update_process_status(process_id, "running", started_at=datetime.now().isoformat())
-            running_processes[process_id] = process
-            # Remove from queue
-            global process_queue
-            process_queue = [p for p in process_queue if p.id != process_id]
+        from indicator_engine import IndicatorEngine
         
+        engine = IndicatorEngine()
+        supported = engine.get_supported_indicators()
+        
+        # Add metadata about each indicator
+        indicator_info = {
+            'sma': {
+                'name': 'Simple Moving Average',
+                'description': 'Average price over a specified period',
+                'parameters': ['period', 'price_field'],
+                'default_period': 20
+            },
+            'ema': {
+                'name': 'Exponential Moving Average', 
+                'description': 'Weighted moving average giving more importance to recent prices',
+                'parameters': ['period', 'price_field'],
+                'default_period': 20
+            },
+            'rsi': {
+                'name': 'Relative Strength Index',
+                'description': 'Momentum oscillator measuring speed and magnitude of price changes',
+                'parameters': ['period', 'price_field'],
+                'default_period': 14,
+                'range': [0, 100]
+            },
+            'macd': {
+                'name': 'Moving Average Convergence Divergence',
+                'description': 'Trend-following momentum indicator',
+                'parameters': ['fast_period', 'slow_period', 'signal_period', 'price_field'],
+                'default_periods': {'fast': 12, 'slow': 26, 'signal': 9}
+            },
+            'bollinger': {
+                'name': 'Bollinger Bands',
+                'description': 'Volatility bands around moving average',
+                'parameters': ['period', 'std_dev', 'price_field'],
+                'default_period': 20,
+                'default_std_dev': 2.0
+            },
+            'truevx': {
+                'name': 'TrueValueX Ranking',
+                'description': 'Advanced ranking system with structural and trend analysis',
+                'parameters': ['base_symbol', 'start_date', 'end_date'],
+                'default_base_symbol': 'Nifty 50',
+                'range': [50, 100]
+            }
+        }
+        
+        return JSONResponse(content={
+            "supported_indicators": supported,
+            "indicator_details": {k: v for k, v in indicator_info.items() if k in supported}
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting supported indicators: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get supported indicators: {str(e)}")
+
+# Background task functions for stock data downloads
+async def download_symbol_data_task(symbol: str, start_date: datetime, end_date: datetime, force_refresh: bool):
+    """Background task to download data for a single symbol"""
+    try:
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            completed_count = 0
-            for i, symbol in enumerate(symbols):
-                processing_start = datetime.now()
-                detail = {
-                    "symbol": symbol,
-                    "status": "error",
-                    "records_added": 0,
-                    "records_updated": 0,
-                    "records_skipped": 0,
-                    "processing_time": "",
-                    "error_message": None
-                }
-                
+            result = await manager.download_historical_data_for_symbol(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=force_refresh
+            )
+            logger.info(f"✅ Background download completed for symbol {symbol}: {result}")
+            
+    except Exception as e:
+        logger.error(f"❌ Background download failed for symbol {symbol}: {e}")
+
+async def download_symbols_data_task(symbols: List[str], start_date: datetime, end_date: datetime, force_refresh: bool):
+    """Background task to download data for multiple symbols"""
+    try:
+        from stock_data_manager import StockDataManager
+        
+        async with StockDataManager() as manager:
+            for symbol in symbols:
                 try:
-                    # Update progress
-                    update_process_status(
-                        process_id,
-                        "running",
-                        items_processed=i,
-                        current_item=symbol
-                    )
-                    
                     result = await manager.download_historical_data_for_symbol(
                         symbol=symbol,
                         start_date=start_date,
                         end_date=end_date,
-                        force_refresh=force_refresh,
-                        smart_load=smart_load
+                        force_refresh=force_refresh
                     )
-                    
-                    # Calculate processing time
-                    processing_end = datetime.now()
-                    processing_time = processing_end - processing_start
-                    detail["processing_time"] = f"{processing_time.total_seconds():.2f}s"
-                    
-                    # Extract result details
-                    if isinstance(result, dict):
-                        # Check if result contains an error
-                        if "error" in result:
-                            detail["status"] = "error"
-                            detail["error_message"] = result["error"]
-                            summary["failed_symbols"] += 1
-                        else:
-                            detail["records_added"] = result.get("records_added", 0)
-                            detail["records_updated"] = result.get("records_updated", 0)
-                            detail["records_skipped"] = result.get("records_skipped", 0)
-                            detail["status"] = "success"
-                            
-                            # Update summary
-                            summary["total_records_added"] += detail["records_added"]
-                            summary["total_records_updated"] += detail["records_updated"]
-                            summary["total_records_skipped"] += detail["records_skipped"]
-                            summary["successful_symbols"] += 1
-                    else:
-                        detail["status"] = "success"
-                        summary["successful_symbols"] += 1
-                    
-                    # Update symbol status after successful download
-                    if detail["status"] == "success":
-                        try:
-                            await manager.update_symbol_data_timestamp(symbol)
-                            await manager.update_symbol_status(symbol, force_update=True)
-                        except Exception as status_error:
-                            logger.warning(f"Failed to update status for {symbol}: {status_error}")
-                    
-                    completed_count += 1
                     logger.info(f"✅ Downloaded data for symbol {symbol}: {result}")
                     await asyncio.sleep(1)  # Rate limiting
-                    
                 except Exception as e:
-                    detail["status"] = "error"
-                    detail["error_message"] = str(e)
-                    summary["failed_symbols"] += 1
-                    processing_end = datetime.now()
-                    processing_time = processing_end - processing_start
-                    detail["processing_time"] = f"{processing_time.total_seconds():.2f}s"
                     logger.error(f"❌ Failed to download data for symbol {symbol}: {e}")
-                
-                processing_details.append(detail)
-            
-            # Update process as completed with detailed results
-            process = get_process_by_id(process_id)
-            if process:
-                process.processing_details = processing_details
-                process.summary = summary
-                
-            update_process_status(
-                process_id, 
-                "completed", 
-                completed_at=datetime.now().isoformat(),
-                items_processed=completed_count
-            )
                     
     except Exception as e:
-        # Update process as failed
-        update_process_status(
-            process_id, 
-            "failed", 
-            completed_at=datetime.now().isoformat(),
-            error_message=str(e)
-        )
         logger.error(f"❌ Background download failed for symbols: {e}")
 
-async def download_index_data_task(process_id: str, index_name: str, start_date: datetime, end_date: datetime, force_refresh: bool, smart_load: bool = False):
-    """Background task to download data for an index with proper progress tracking"""
+async def download_index_data_task(index_name: str, start_date: datetime, end_date: datetime, force_refresh: bool):
+    """Background task to download data for an index"""
     try:
-        # Move process from queue to running
-        process = get_process_by_id(process_id)
-        if process:
-            update_process_status(process_id, "running", started_at=datetime.now().isoformat())
-            running_processes[process_id] = process
-            # Remove from queue
-            global process_queue
-            process_queue = [p for p in process_queue if p.id != process_id]
-        
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            # Get all symbols for the index to track progress
-            mappings = await manager.get_symbol_mappings(index_name=index_name, mapped_only=True)
-            total_symbols = len(mappings)
-            
-            if total_symbols == 0:
-                update_process_status(
-                    process_id, 
-                    "failed", 
-                    completed_at=datetime.now().isoformat(),
-                    error_message=f"No mapped symbols found for index {index_name}"
-                )
-                return
-            
-            # Update total items count
-            update_process_status(process_id, "running", total_items=total_symbols)
-            
-            # Process each symbol individually for progress tracking
-            successful_downloads = 0
-            errors = []
-            processing_details = []
-            total_records_added = 0
-            total_records_updated = 0
-            total_records_skipped = 0
-            
-            for i, mapping in enumerate(mappings):
-                try:
-                    # Update current progress
-                    update_process_status(
-                        process_id, 
-                        "running",
-                        items_processed=i,
-                        current_item=mapping.symbol
-                    )
-                    
-                    # Download data for this symbol
-                    result = await manager.download_historical_data_for_symbol(
-                        symbol=mapping.symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        force_refresh=force_refresh,
-                        smart_load=smart_load
-                    )
-                    
-                    # Extract detailed results
-                    detail = {
-                        "symbol": mapping.symbol,
-                        "company_name": mapping.company_name,
-                        "status": "success",
-                        "records_added": result.get('records_added', 0),
-                        "records_updated": result.get('records_updated', 0),
-                        "records_skipped": result.get('records_skipped', 0),
-                        "date_range": f"{result.get('start_date', 'N/A')} to {result.get('end_date', 'N/A')}",
-                        "processing_time": result.get('processing_time', 'N/A'),
-                        "total_records": result.get('total_records', 0)
-                    }
-                    
-                    processing_details.append(detail)
-                    total_records_added += detail['records_added']
-                    total_records_updated += detail['records_updated']
-                    total_records_skipped += detail['records_skipped']
-                    successful_downloads += 1
-                    
-                    logger.info(f"✅ Downloaded data for {mapping.symbol} ({i+1}/{total_symbols})")
-                    
-                    # Small delay to avoid overwhelming the API
-                    await asyncio.sleep(0.5)
-                    
-                except Exception as e:
-                    error_msg = f"Error downloading data for {mapping.symbol}: {str(e)}"
-                    logger.error(f"❌ {error_msg}")
-                    errors.append(error_msg)
-                    
-                    # Add failed symbol to processing details
-                    processing_details.append({
-                        "symbol": mapping.symbol,
-                        "company_name": mapping.company_name,
-                        "status": "failed",
-                        "error": str(e),
-                        "records_added": 0,
-                        "records_updated": 0,
-                        "records_skipped": 0,
-                        "date_range": "N/A",
-                        "processing_time": "N/A",
-                        "total_records": 0
-                    })
-            
-            # Create summary
-            summary = {
-                "total_symbols": total_symbols,
-                "successful_downloads": successful_downloads,
-                "failed_downloads": len(errors),
-                "total_records_added": total_records_added,
-                "total_records_updated": total_records_updated,
-                "total_records_skipped": total_records_skipped,
-                "success_rate": round((successful_downloads / total_symbols) * 100, 2) if total_symbols > 0 else 0,
-                "date_range": f"{start_date.date() if start_date else 'N/A'} to {end_date.date() if end_date else 'N/A'}",
-                "index_name": index_name
-            }
-            
-            # Update process as completed with details
-            update_process_status(
-                process_id, 
-                "completed", 
-                completed_at=datetime.now().isoformat(),
-                items_processed=total_symbols,
-                current_item=None,
-                processing_details=processing_details,
-                summary=summary
+            result = await manager.download_historical_data_for_index(
+                index_name=index_name,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=force_refresh
             )
-            
-            logger.info(f"✅ Background download completed for index {index_name}: {successful_downloads}/{total_symbols} successful")
+            logger.info(f"✅ Background download completed for index {index_name}: {result}")
             
     except Exception as e:
-        # Update process as failed
-        update_process_status(
-            process_id, 
-            "failed", 
-            completed_at=datetime.now().isoformat(),
-            error_message=str(e)
-        )
         logger.error(f"❌ Background download failed for index {index_name}: {e}")
 
-async def download_industry_data_task(process_id: str, industry_name: str, start_date: datetime, end_date: datetime, force_refresh: bool, smart_load: bool = False):
-    """Background task to download data for an industry with proper progress tracking"""
+async def download_industry_data_task(industry_name: str, start_date: datetime, end_date: datetime, force_refresh: bool):
+    """Background task to download data for an industry"""
     try:
-        # Move process from queue to running
-        process = get_process_by_id(process_id)
-        if process:
-            update_process_status(process_id, "running", started_at=datetime.now().isoformat())
-            running_processes[process_id] = process
-            # Remove from queue
-            global process_queue
-            process_queue = [p for p in process_queue if p.id != process_id]
-        
         from stock_data_manager import StockDataManager
         
         async with StockDataManager() as manager:
-            # Get all symbols for the industry to track progress
-            mappings = await manager.get_symbol_mappings(industry=industry_name, mapped_only=True)
-            total_symbols = len(mappings)
-            
-            if total_symbols == 0:
-                update_process_status(
-                    process_id, 
-                    "failed", 
-                    completed_at=datetime.now().isoformat(),
-                    error_message=f"No mapped symbols found for industry {industry_name}"
-                )
-                return
-            
-            # Update total items count
-            update_process_status(process_id, "running", total_items=total_symbols)
-            
-            # Process each symbol individually for progress tracking
-            successful_downloads = 0
-            errors = []
-            
-            for i, mapping in enumerate(mappings):
-                try:
-                    # Update current progress
-                    update_process_status(
-                        process_id, 
-                        "running",
-                        items_processed=i,
-                        current_item=mapping.symbol
-                    )
-                    
-                    # Download data for this symbol
-                    result = await manager.download_historical_data_for_symbol(
-                        symbol=mapping.symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        force_refresh=force_refresh,
-                        smart_load=smart_load
-                    )
-                    
-                    successful_downloads += 1
-                    logger.info(f"✅ Downloaded data for {mapping.symbol} ({i+1}/{total_symbols})")
-                    
-                    # Small delay to avoid overwhelming the API
-                    await asyncio.sleep(0.5)
-                    
-                except Exception as e:
-                    error_msg = f"Error downloading data for {mapping.symbol}: {str(e)}"
-                    logger.error(f"❌ {error_msg}")
-                    errors.append(error_msg)
-            
-            # Update process as completed
-            update_process_status(
-                process_id, 
-                "completed", 
-                completed_at=datetime.now().isoformat(),
-                items_processed=total_symbols,
-                current_item=None
+            result = await manager.download_historical_data_for_industry(
+                industry_name=industry_name,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=force_refresh
             )
-            
-            logger.info(f"✅ Background download completed for industry {industry_name}: {successful_downloads}/{total_symbols} successful")
+            logger.info(f"✅ Background download completed for industry {industry_name}: {result}")
             
     except Exception as e:
-        # Update process as failed
-        update_process_status(
-            process_id, 
-            "failed", 
-            completed_at=datetime.now().isoformat(),
-            error_message=str(e)
-        )
         logger.error(f"❌ Background download failed for industry {industry_name}: {e}")
-
-# Scheduler API Endpoints
-@app.get("/api/scheduler/processes")
-async def get_all_processes():
-    """Get all processes (pending, running, completed)"""
-    try:
-        # Convert ProcessEntry objects to dictionaries
-        pending = [process.dict() for process in process_queue if process.status == "pending"]
-        running = [process.dict() for process in running_processes.values()]
-        completed = [process.dict() for process in completed_processes[-50:]]  # Last 50 completed
-        
-        return {
-            "pending": pending,
-            "running": running,
-            "completed": completed
-        }
-    except Exception as e:
-        logger.error(f"Error getting processes: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/scheduler/processes/{process_id}/progress")
-async def get_process_progress(process_id: str):
-    """Get detailed progress for a specific process"""
-    try:
-        process = get_process_by_id(process_id)
-        if not process:
-            raise HTTPException(status_code=404, detail="Process not found")
-        
-        # Calculate progress percentage
-        progress = 0.0
-        if process.total_items > 0:
-            progress = (process.items_processed / process.total_items) * 100
-        
-        # Estimate completion time
-        estimated_completion = None
-        if process.started_at and process.items_processed > 0 and progress > 0:
-            start_time = datetime.fromisoformat(process.started_at)
-            elapsed = datetime.now() - start_time
-            rate = process.items_processed / elapsed.total_seconds()
-            remaining_items = process.total_items - process.items_processed
-            if rate > 0:
-                eta_seconds = remaining_items / rate
-                estimated_completion = (datetime.now() + timedelta(seconds=eta_seconds)).isoformat()
-        
-        return TaskProgress(
-            task_id=process.id,
-            status=process.status,
-            progress=progress,
-            current_item=getattr(process, 'current_item', None),
-            items_processed=process.items_processed,
-            total_items=process.total_items,
-            start_time=process.started_at,
-            estimated_completion=estimated_completion
-        ).dict()
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting process progress: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/scheduler/processes/{process_id}/details")
-async def get_process_details(process_id: str):
-    """Get detailed processing results for a completed process"""
-    try:
-        process = get_process_by_id(process_id)
-        if not process:
-            raise HTTPException(status_code=404, detail="Process not found")
-        
-        # Return available process details
-        return {
-            "process_id": process_id,
-            "status": process.status,
-            "type": process.type,
-            "symbol": process.symbol,
-            "index_name": process.index_name,
-            "industry": process.industry,
-            "started_at": process.started_at,
-            "completed_at": process.completed_at,
-            "items_processed": process.items_processed,
-            "total_items": process.total_items,
-            "processing_details": process.processing_details or [],
-            "summary": process.summary or {},
-            "error_message": process.error_message
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting process details: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/scheduler/processes/{process_id}/cancel")
-async def cancel_process(process_id: str):
-    """Cancel a pending or running process"""
-    try:
-        process = get_process_by_id(process_id)
-        if not process:
-            raise HTTPException(status_code=404, detail="Process not found")
-        
-        if process.status in ["completed", "failed"]:
-            raise HTTPException(status_code=400, detail="Cannot cancel completed process")
-        
-        update_process_status(process_id, "cancelled", completed_at=datetime.now().isoformat())
-        
-        return {"message": f"Process {process_id} cancelled successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error cancelling process: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/scheduler/processes/{process_id}")
-async def delete_process(process_id: str):
-    """Delete a completed or failed process from history"""
-    try:
-        process = get_process_by_id(process_id)
-        if not process:
-            raise HTTPException(status_code=404, detail="Process not found")
-        
-        if process.status in ["pending", "running"]:
-            raise HTTPException(status_code=400, detail="Cannot delete active process")
-        
-        # Remove from completed processes
-        global completed_processes
-        completed_processes = [p for p in completed_processes if p.id != process_id]
-        
-        return {"message": f"Process {process_id} deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting process: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=3001, reload=True)

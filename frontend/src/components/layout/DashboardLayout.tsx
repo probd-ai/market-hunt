@@ -10,9 +10,7 @@ import {
   Bars3Icon,
   XMarkIcon,
   BuildingOfficeIcon,
-  CurrencyDollarIcon,
-  ClockIcon,
-  ListBulletIcon
+  CloudArrowDownIcon
 } from '@heroicons/react/24/outline';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
@@ -21,11 +19,9 @@ import { usePathname } from 'next/navigation';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: HomeIcon },
   { name: 'URL Management', href: '/urls', icon: LinkIcon },
-  { name: 'Price Data Management', href: '/stocks', icon: CurrencyDollarIcon },
-  { name: 'Charts & Analysis', href: '/charts', icon: ChartBarIcon },
-  { name: 'Indexes', href: '/indexes', icon: ListBulletIcon },
+  { name: 'Data Load Management', href: '/data-load', icon: CloudArrowDownIcon },
+  { name: 'Indexes', href: '/indexes', icon: ChartBarIcon },
   { name: 'Industries', href: '/industries', icon: BuildingOfficeIcon },
-  { name: 'Scheduler', href: '/scheduler', icon: ClockIcon },
   { name: 'Analytics', href: '/analytics', icon: DocumentTextIcon },
   { name: 'Settings', href: '/settings', icon: CogIcon },
 ];

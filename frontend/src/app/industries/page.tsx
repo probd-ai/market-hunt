@@ -3,7 +3,7 @@
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { useQuery } from '@tanstack/react-query';
-import { api as apiClient } from '@/lib/api';
+import { apiClient } from '@/lib/api';
 import { 
   BuildingOfficeIcon,
   ChartBarIcon,
@@ -178,13 +178,13 @@ export default function IndustriesPage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Total Companies</CardTitle>
+              <CardTitle className="text-sm font-medium">Unique Companies</CardTitle>
               <BuildingOfficeIcon className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{formatNumber(overview.total_companies)}</div>
               <p className="text-xs text-muted-foreground">
-                Across all industries
+                Unique companies across all industries
               </p>
             </CardContent>
           </Card>

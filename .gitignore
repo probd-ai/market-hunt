@@ -4,68 +4,80 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
-venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
 .venv/
+venv/
 ENV/
-env.bak/
-venv.bak/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+fastapi.log
+nextjs.log
+
+# Database
+*.db
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Environment variables
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
+# CSV data files (optional - uncomment if you don't want to track data files)
+# *.csv
 
-# Logs
-*.log
-logs/
-api_server.log
-backend.log
-fastapi.log
-nextjs.log
-
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Node.js (Frontend)
+# Node modules (for frontend)
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.npm
-.eslintcache
 
 # Next.js
-.next/
-out/
-build/
+frontend/.next/
+frontend/out/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
+# Coverage reports
+htmlcov/
+.coverage
+.pytest_cache/
 
-# System reports and temporary files
-system_report_*.json
-*.tmp
-*.temp
-nohup.out
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# CSV verification files
-*_verification.csv
-
-# Test files
-test_*.py
-*_test.py
+# pyenv
+.python-version

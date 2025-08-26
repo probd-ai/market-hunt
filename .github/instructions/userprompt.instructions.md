@@ -1,8 +1,6 @@
 ---
 applyTo: '**'
 ---
-Always read [project_DNA.md](../../project_DNA.md) file before starting any task. This file contains important information about the project structure, components, and their purposes.
-
 This is a project for market research and analysis, focusing on user needs and preferences. 
 
 The goal is develop each component one -by one using on-fly demand . Means User will not tell you full picture of their needs and preferences upfront, instead they will provide feedback and requirements incrementally as the project progresses.
