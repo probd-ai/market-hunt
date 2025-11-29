@@ -194,6 +194,9 @@ class IndicatorEngine:
                 
             if isinstance(end_date, str):
                 end_dt = datetime.fromisoformat(end_date.replace('T', ' ').split('.')[0])
+                # BUGFIX: Add one day to end_dt to ensure we capture all data for the end date
+                # This fixes the issue where benchmark data is missing the latest day due to timestamp precision
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
             else:
                 end_dt = end_date
             
@@ -475,11 +478,12 @@ def calculate_truevx_ranking(target_data: List[Dict], benchmark_data: List[Dict]
     target_df = pd.DataFrame(target_data)
     benchmark_df = pd.DataFrame(benchmark_data)
     
-    # Ensure date columns are datetime
-    target_df['date'] = pd.to_datetime(target_df['date'])
-    benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
+    # Ensure date columns are datetime and normalize to date-only for proper merging
+    # Handle mixed date formats (some with timestamps, some without)
+    target_df['date'] = pd.to_datetime(target_df['date'], format='mixed').dt.date
+    benchmark_df['date'] = pd.to_datetime(benchmark_df['date'], format='mixed').dt.date
     
-    # Merge on dates (inner join to get common dates)
+    # Merge on dates (inner join to get common dates) - now using date-only
     merged_df = pd.merge(target_df, benchmark_df, on='date', suffixes=('_target', '_bench'))
     
     if len(merged_df) < max(s1, m2, l3):
@@ -566,7 +570,7 @@ def calculate_truevx_ranking(target_data: List[Dict], benchmark_data: List[Dict]
     for i, date in enumerate(merged_df['date']):
         if not np.isnan(composite_norm[i]):
             result.append({
-                'date': date.strftime('%Y-%m-%d'),
+                'date': date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date),
                 'truevx_score': round(float(composite_norm[i]), 4),
                 'mean_short': round(float(mean_score_s1[i]), 4) if not np.isnan(mean_score_s1[i]) else None,
                 'mean_mid': round(float(mean_score_m2[i]), 4) if not np.isnan(mean_score_m2[i]) else None,

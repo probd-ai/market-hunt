@@ -27,6 +27,7 @@ export default function DataLoadManagementPage() {
   const [showMappedOnly, setShowMappedOnly] = useState(true);
   const [gapStatuses, setGapStatuses] = useState<StockGapStatus[]>([]);
   const [isCheckingGaps, setIsCheckingGaps] = useState(false);
+  const [checkingProgress, setCheckingProgress] = useState({ current: 0, total: 0 });
   
   const queryClient = useQueryClient();
 
@@ -71,21 +72,74 @@ export default function DataLoadManagementPage() {
     },
   });
 
-  // Handle gap checking
+  // Handle gap checking with progressive updates and caching
   const handleCheckGaps = async () => {
     if (!mappingsData?.mappings) return;
     
+    const allSymbols = mappingsData.mappings.map(m => m.symbol);
+    const cacheKey = `gap-statuses-${new Date().toDateString()}`;
+    
+    // Check cache first
+    const cachedData = localStorage.getItem(cacheKey);
+    if (cachedData) {
+      try {
+        const cached = JSON.parse(cachedData);
+        const cachedStatuses = cached.filter((status: StockGapStatus) => 
+          allSymbols.includes(status.symbol)
+        );
+        if (cachedStatuses.length === allSymbols.length) {
+          setGapStatuses(cachedStatuses);
+          return;
+        }
+      } catch (e) {
+        // Failed to parse cached gap statuses
+      }
+    }
+    
     setIsCheckingGaps(true);
+    setCheckingProgress({ current: 0, total: allSymbols.length });
+    setGapStatuses([]); // Clear existing statuses
+    
     try {
-      const symbols = filteredMappings.map(m => m.symbol);
-      const gaps = await apiClient.checkStockGaps(symbols);
-      setGapStatuses(gaps);
+      const BATCH_SIZE = 20;
+      const allStatuses: StockGapStatus[] = [];
+      
+      // Process symbols in batches
+      for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+        const batch = allSymbols.slice(i, i + BATCH_SIZE);
+        console.log(`Checking batch ${Math.floor(i/BATCH_SIZE) + 1}: ${batch.length} symbols`);
+        
+        const batchStatuses = await apiClient.checkStockGaps(batch);
+        allStatuses.push(...batchStatuses);
+        
+        // Update UI progressively
+        setGapStatuses([...allStatuses]);
+        setCheckingProgress({ current: allStatuses.length, total: allSymbols.length });
+        
+        // Small delay to prevent overwhelming the backend
+        if (i + BATCH_SIZE < allSymbols.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+      // Cache the results for the day
+      localStorage.setItem(cacheKey, JSON.stringify(allStatuses));
+      
     } catch (error) {
       console.error('Failed to check gaps:', error);
       alert('Failed to check data gaps');
     } finally {
       setIsCheckingGaps(false);
+      setCheckingProgress({ current: 0, total: 0 });
     }
+  };
+
+  // Clear cached gap statuses
+  const handleClearCache = () => {
+    const cacheKey = `gap-statuses-${new Date().toDateString()}`;
+    localStorage.removeItem(cacheKey);
+    setGapStatuses([]);
+    console.log('Cleared gap status cache');
   };
 
   // Filter mappings based on search and selections
@@ -242,7 +296,20 @@ export default function DataLoadManagementPage() {
                 className="flex items-center gap-2"
               >
                 <MagnifyingGlassIcon className={`h-4 w-4 ${isCheckingGaps ? 'animate-spin' : ''}`} />
-                Check All Gaps
+                {isCheckingGaps && checkingProgress.total > 0 
+                  ? `Checking... (${checkingProgress.current}/${checkingProgress.total})`
+                  : 'Check All Gaps'
+                }
+              </Button>
+              
+              <Button
+                onClick={handleClearCache}
+                disabled={isCheckingGaps}
+                variant="outline"
+                className="flex items-center gap-2"
+                title="Clear today's cache and force fresh check"
+              >
+                🗑️ Clear Cache
               </Button>
             </div>
           </CardContent>
@@ -347,7 +414,7 @@ export default function DataLoadManagementPage() {
                         Data Status
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Records
+                        Latest Date
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Coverage
@@ -383,7 +450,7 @@ export default function DataLoadManagementPage() {
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                            {gapStatus?.record_count?.toLocaleString() || '0'}
+                            {gapStatus?.date_range?.end || 'No data'}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                             {gapStatus?.coverage_percentage ? `${gapStatus.coverage_percentage}%` : '0%'}

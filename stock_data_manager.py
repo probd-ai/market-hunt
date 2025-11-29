@@ -725,8 +725,9 @@ class StockDataManager:
             "last_download_status": "success"
         }
         
+        # Use nse_scrip_code as the primary key since multiple symbols can map to same scrip code
         await collection.replace_one(
-            {"symbol": symbol},
+            {"nse_scrip_code": scrip_code},
             metadata,
             upsert=True
         )
@@ -838,6 +839,36 @@ class StockDataManager:
                 'errors': [error_msg],
                 'success': False
             }
+
+    async def get_symbol_date_range(self, symbol: str) -> Optional[Dict[str, datetime]]:
+        """Get the date range for a specific symbol across all collections"""
+        date_range = {"earliest": None, "latest": None}
+        
+        # Get all price collections
+        collections = await self.get_all_price_collections()
+        
+        for collection_name in collections:
+            collection = self.db[collection_name]
+            
+            # Get earliest date for this symbol
+            earliest = await collection.find({"symbol": symbol}).sort("date", ASCENDING).limit(1).to_list(1)
+            if earliest:
+                earliest_date = earliest[0]["date"]
+                if date_range["earliest"] is None or earliest_date < date_range["earliest"]:
+                    date_range["earliest"] = earliest_date
+            
+            # Get latest date for this symbol
+            latest = await collection.find({"symbol": symbol}).sort("date", DESCENDING).limit(1).to_list(1)
+            if latest:
+                latest_date = latest[0]["date"]
+                if date_range["latest"] is None or latest_date > date_range["latest"]:
+                    date_range["latest"] = latest_date
+        
+        # Return None if no data found
+        if date_range["earliest"] is None or date_range["latest"] is None:
+            return None
+            
+        return date_range
 
     async def get_data_statistics(self) -> Dict[str, Any]:
         """Get statistics about stored price data"""

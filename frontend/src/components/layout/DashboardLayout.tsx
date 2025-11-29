@@ -10,7 +10,8 @@ import {
   Bars3Icon,
   XMarkIcon,
   BuildingOfficeIcon,
-  CloudArrowDownIcon
+  CloudArrowDownIcon,
+  BeakerIcon
 } from '@heroicons/react/24/outline';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
@@ -20,6 +21,7 @@ const navigation = [
   { name: 'Dashboard', href: '/', icon: HomeIcon },
   { name: 'URL Management', href: '/urls', icon: LinkIcon },
   { name: 'Data Load Management', href: '/data-load', icon: CloudArrowDownIcon },
+  { name: 'Indicator Management', href: '/indicators', icon: BeakerIcon },
   { name: 'Indexes', href: '/indexes', icon: ChartBarIcon },
   { name: 'Industries', href: '/industries', icon: BuildingOfficeIcon },
   { name: 'Analytics', href: '/analytics', icon: DocumentTextIcon },

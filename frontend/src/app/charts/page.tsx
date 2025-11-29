@@ -10,7 +10,7 @@ export default function ChartsPage() {
   const searchParams = useSearchParams();
   const [selectedSymbol, setSelectedSymbol] = useState<string>(searchParams.get('symbol') || 'TCS');
   const [startDate, setStartDate] = useState<string>('2005-01-01'); // Full historical range
-  const [endDate, setEndDate] = useState<string>('2025-08-17');
+  const [endDate, setEndDate] = useState<string>(new Date().toISOString().split('T')[0]); // Current date
   const [chartType, setChartType] = useState<'candlestick' | 'line' | 'area'>('candlestick');
   const [loadFullData, setLoadFullData] = useState<boolean>(true); // Load all data by default
 
@@ -20,7 +20,14 @@ export default function ChartsPage() {
     queryFn: async () => {
       console.log('🔄 Fetching stock data for:', selectedSymbol, startDate, endDate, loadFullData ? 50000 : 5000);
       const result = await api.getStockData(selectedSymbol, startDate, endDate, loadFullData ? 50000 : 5000);
-      console.log('✅ Stock data received:', result);
+      console.log('✅ Stock data received:', {
+        symbol: selectedSymbol,
+        startDate,
+        endDate,
+        recordCount: result.data?.length,
+        firstRecord: result.data?.[0],
+        lastRecord: result.data?.[result.data?.length - 1]
+      });
       return result;
     },
     enabled: !!selectedSymbol,
@@ -49,8 +56,12 @@ export default function ChartsPage() {
 
   const loadFullHistoricalData = () => {
     setStartDate('2005-01-01');
-    setEndDate('2025-08-17');
+    setEndDate(new Date().toISOString().split('T')[0]);
     setLoadFullData(true);
+    console.log('📅 Loading full historical data:', {
+      start: '2005-01-01',
+      end: new Date().toISOString().split('T')[0]
+    });
   };
 
   const loadRecentData = (months: number) => {

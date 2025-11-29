@@ -1,4 +1,4 @@
-import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, SymbolMappingResponse, StockPriceData, StockDataResponse, StockDataStatistics, DownloadStockDataRequest, SymbolMappingFilters, ProgressUpdate, HistoricalProcessing, DataGapInfo, ProcessEntry, TaskProgress, SchedulerData } from '@/types';
+import { URLConfig, URLFormData, DataOverview, ProcessingResponse, SymbolMapping, StockMappingsResponse } from '@/types';
 
 const API_BASE = '/api';
 const BACKEND_API = 'http://localhost:3001/api';
@@ -85,6 +85,11 @@ class APIClient {
     }
   }
 
+  // Backward compatibility alias for createUrl
+  async addUrl(data: URLFormData): Promise<URLConfig> {
+    return this.createUrl(data);
+  }
+
   // Data Management
   async getDataOverview(): Promise<DataOverview> {
     try {
@@ -148,6 +153,42 @@ class APIClient {
     }
   }
 
+  // Backward compatibility alias for getSymbolMappings
+  async getStockMappings(filters?: SymbolMappingFilters & {
+    include_up_to_date?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<SymbolMappingResponse> {
+    return this.getSymbolMappings(filters);
+  }
+
+  async getIndicatorData(symbol: string, indicator: string, params: any): Promise<any> {
+    try {
+      const requestBody = {
+        symbol,
+        indicator_type: indicator, // Map 'indicator' to 'indicator_type' for backend
+        start_date: params.startDate,
+        end_date: params.endDate,
+        base_symbol: params.baseSymbol,
+        s1: params.s1,
+        m2: params.m2,
+        l3: params.l3,
+        strength: params.strength,
+        w_long: params.w_long,
+        w_mid: params.w_mid,
+        w_short: params.w_short,
+        deadband_frac: params.deadband_frac
+      };
+      
+      return await this.request(`/stock/indicators`, {
+        method: 'POST',
+        body: JSON.stringify(requestBody)
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to fetch indicator data');
+    }
+  }
+
   async updateUpToDateStatus(symbols?: string[]): Promise<{ success: boolean; message: string; updated_count: number }> {
     try {
       return await this.directRequest(`/stock/mappings/update-status`, {
@@ -167,6 +208,11 @@ class APIClient {
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : 'Failed to refresh symbol mappings');
     }
+  }
+
+  // Backward compatibility alias for refreshSymbolMappings
+  async refreshStockMappings(): Promise<{ success: boolean; message: string; total_mappings: number }> {
+    return this.refreshSymbolMappings();
   }
 
   async getStockData(symbol: string, startDate?: string, endDate?: string, limit: number = 5000): Promise<StockDataResponse> {
@@ -193,75 +239,57 @@ class APIClient {
 
   async checkDataGaps(request: { symbol?: string; symbols?: string[]; index_name?: string; industry?: string; start_date: string; end_date: string; full_check?: boolean }): Promise<DataGapInfo[]> {
     try {
-      // Use the backend gaps API for accurate gap analysis
-      const gapRequest: any = {
-        start_date: request.start_date,
-        end_date: request.end_date,
-        full_historical_analysis: request.full_check || false  // Map full_check to full_historical_analysis
-      };
-
+      // Build symbols array based on the request
+      let symbols: string[] = [];
+      
       if (request.symbol) {
-        gapRequest.symbol = request.symbol;
+        symbols = [request.symbol];
+      } else if (request.symbols) {
+        symbols = request.symbols;
       } else if (request.index_name) {
-        gapRequest.index_name = request.index_name;
+        // For index, get all symbols from that index
+        const mappings = await this.getSymbolMappings();
+        symbols = mappings.mappings
+          .filter((mapping: SymbolMapping) => mapping.index_names?.includes(request.index_name!))
+          .map((mapping: SymbolMapping) => mapping.symbol);
       } else if (request.industry) {
-        gapRequest.industry = request.industry;
+        // For industry, get all symbols from that industry
+        const mappings = await this.getSymbolMappings();
+        symbols = mappings.mappings
+          .filter((mapping: SymbolMapping) => mapping.industry === request.industry)
+          .map((mapping: SymbolMapping) => mapping.symbol);
       }
 
-      const response: any = await this.directRequest('/stock/gaps', {
+      if (symbols.length === 0) {
+        return [];
+      }
+
+      const response: any = await this.request('/stock/gaps', {
         method: 'POST',
-        body: JSON.stringify(gapRequest),
+        body: JSON.stringify(symbols),
       });
 
       // Convert backend response to frontend format
       const gaps: DataGapInfo[] = [];
       
-      if (request.symbol && response.gaps) {
-        const gapData = response.gaps;
-        gaps.push({
-          symbol: request.symbol,
-          missing_dates: gapData.gaps?.map((gap: any) => `${gap.start} to ${gap.end}`) || [],
-          first_date: gapData.has_data ? 'Has data' : 'No data available',
-          last_date: gapData.has_data ? 'Current' : 'No data available',
-          total_gaps: gapData.total_missing_days || 0,
-          downloadable_gaps: gapData.total_missing_days || 0,
-          realistic_start_date: gapData.date_range?.start || request.start_date,
-          user_range_start: request.start_date,
-          user_range_end: request.end_date,
-          user_range_gaps: gapData.total_missing_days || 0,
-          gaps_by_year: gapData.yearly_breakdown?.reduce((acc: any, year: any) => {
-            if (year.missing_days > 0) { // Only include years with actual gaps
-              acc[year.year] = year.missing_days;
-            }
-            return acc;
-          }, {}) || {},
-          data_available_from: gapData.date_range?.start || request.start_date,
-          data_available_until: gapData.date_range?.end || request.end_date,
-          total_data_points: gapData.total_actual_days || 0,
-          full_period_gaps: (gapData.total_missing_days || 0) > 0
-        });
-      } else if (response.gaps) {
-        // Handle multiple symbols (index/industry)
-        Object.entries(response.gaps).forEach(([symbol, gapData]: [string, any]) => {
+      if (Array.isArray(response)) {
+        response.forEach((gapData: any) => {
           gaps.push({
-            symbol,
-            missing_dates: gapData.gaps?.map((gap: any) => `${gap.start} to ${gap.end}`) || [],
-            first_date: gapData.has_data ? 'Has data' : 'No data available',
-            last_date: gapData.has_data ? 'Current' : 'No data available',
-            total_gaps: gapData.total_missing_days || 0,
-            downloadable_gaps: gapData.total_missing_days || 0,
+            symbol: gapData.symbol,
+            missing_dates: gapData.gap_details || [],
+            first_date: gapData.date_range?.start || 'No data',
+            last_date: gapData.date_range?.end || 'No data',
+            total_gaps: gapData.needs_update ? 1 : 0,
+            downloadable_gaps: gapData.needs_update ? 1 : 0,
             realistic_start_date: gapData.date_range?.start || request.start_date,
             user_range_start: request.start_date,
             user_range_end: request.end_date,
-            user_range_gaps: gapData.total_missing_days || 0,
-            gaps_by_year: gapData.yearly_breakdown?.reduce((acc: any, year: any) => {
-              acc[year.year] = year.missing_days;
-              return acc;
-            }, {}) || {},
-            data_available_from: gapData.date_range?.start || 'No data',
-            data_available_until: gapData.date_range?.end || 'No data',
-            total_data_points: gapData.total_actual_days || 0,
-            full_period_gaps: (gapData.total_missing_days || 0) > 0
+            user_range_gaps: gapData.needs_update ? 1 : 0,
+            gaps_by_year: {},
+            data_available_from: gapData.date_range?.start || request.start_date,
+            data_available_until: gapData.date_range?.end || request.end_date,
+            total_data_points: gapData.record_count || 0,
+            full_period_gaps: gapData.needs_update || false
           });
         });
       }
@@ -270,6 +298,22 @@ class APIClient {
     } catch (error) {
       console.error('Error checking data gaps:', error);
       throw new Error(error instanceof Error ? error.message : 'Failed to check data gaps');
+    }
+  }
+
+  // Backward compatibility alias for checkDataGaps
+  async checkStockGaps(symbols: string[]): Promise<any[]> {
+    try {
+      // Call the gaps API directly and return the StockGapStatus objects
+      const response: any = await this.request('/stock/gaps', {
+        method: 'POST',
+        body: JSON.stringify(symbols),
+      });
+      
+      return response; // Return the StockGapStatus array directly
+    } catch (error) {
+      console.error('Error checking stock gaps:', error);
+      throw new Error(error instanceof Error ? error.message : 'Failed to check stock gaps');
     }
   }
 
@@ -497,7 +541,88 @@ class APIClient {
       throw new Error(error instanceof Error ? error.message : 'Failed to get industry index companies');
     }
   }
+
+  // Analytics API
+  async getIndexDistribution(params: {
+    indexSymbol?: string;
+    startDate?: string;
+    endDate?: string;
+    scoreRanges?: string;
+    metric?: string;
+    includePrice?: boolean;
+    includeSymbols?: boolean;
+  } = {}): Promise<any> {
+    try {
+      const queryParams = new URLSearchParams();
+      
+      if (params.indexSymbol) queryParams.append('index_symbol', params.indexSymbol);
+      if (params.startDate) queryParams.append('start_date', params.startDate);
+      if (params.endDate) queryParams.append('end_date', params.endDate);
+      if (params.scoreRanges) queryParams.append('score_ranges', params.scoreRanges);
+      if (params.metric) queryParams.append('metric', params.metric);
+      if (params.includePrice !== undefined) queryParams.append('include_price', params.includePrice.toString());
+      if (params.includeSymbols !== undefined) queryParams.append('include_symbols', params.includeSymbols.toString());
+
+      const endpoint = `/analytics/index-distribution${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+      return await this.directRequest(endpoint);
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to get index distribution data');
+    }
+  }
+
+  // Simulation API
+  async saveStrategy(strategy: any): Promise<any> {
+    try {
+      return await this.directRequest('/simulation/strategies', {
+        method: 'POST',
+        body: JSON.stringify(strategy)
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to save strategy');
+    }
+  }
+
+  async getStrategies(): Promise<any> {
+    try {
+      return await this.directRequest('/simulation/strategies');
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to get strategies');
+    }
+  }
+
+  async updateStrategy(strategyId: string, strategy: any): Promise<any> {
+    try {
+      return await this.directRequest(`/simulation/strategies/${strategyId}`, {
+        method: 'PUT',
+        body: JSON.stringify(strategy)
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to update strategy');
+    }
+  }
+
+  async deleteStrategy(strategyId: string): Promise<any> {
+    try {
+      return await this.directRequest(`/simulation/strategies/${strategyId}`, {
+        method: 'DELETE'
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to delete strategy');
+    }
+  }
+
+  async runSimulation(params: any): Promise<any> {
+    try {
+      return await this.directRequest('/simulation/run', {
+        method: 'POST',
+        body: JSON.stringify(params)
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Failed to run simulation');
+    }
+  }
 }
 
 export const api = new APIClient();
+export const apiClient = api; // Backward compatibility alias
 export default api;
